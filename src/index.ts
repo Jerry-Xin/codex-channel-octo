@@ -28,6 +28,7 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
+import { isConversationMdEvent } from './conversation-md.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
@@ -245,7 +246,8 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
       if (gateway.draining) return;
       // Match the gateway's self-echo guard: server preference notifications
       // authored as this bot must reach the router to invalidate its cache.
-      if (msg.from_uid === gateway.botId && msg.payload.event?.type !== 'mention_pref_updated') return;
+      if (msg.from_uid === gateway.botId && msg.payload.event?.type !== 'mention_pref_updated'
+        && !isConversationMdEvent(msg.payload.event?.type)) return;
       const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
         .catch((err) => {
           console.error(`[codex-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
@@ -651,7 +653,8 @@ export async function handleMessage(
       // only when there is no history. Later turns carry only the delta. The
       // cursor was already advanced above, so dropping the delta here does not
       // strand messages — history covers them and they must not be re-shown.
-      const injectedContext = firstTurnHistory ? firstTurnHistory : groupContextBlock;
+      const serverMdContext = isGroup ? await router.getConversationMd(channelId, channelType) ?? '' : '';
+      const injectedContext = serverMdContext + (firstTurnHistory ? firstTurnHistory : groupContextBlock);
       const userContentForLLM = assembleUserMessage(
         injectedContext,
         userBody,
@@ -671,7 +674,7 @@ export async function handleMessage(
       // Only built when resuming — it's the sole consumer (sessionOpts below), so a
       // first turn (no resume) would otherwise assemble it just to discard it.
       const fallbackRetryPrompt = resume
-        ? assembleUserMessage(historyBlock, userBody, MAX_USER_LLM_BYTES)
+        ? assembleUserMessage(serverMdContext + historyBlock, userBody, MAX_USER_LLM_BYTES)
         : undefined;
 
       // --- Query agent with structural role separation (Q3 fix) ---

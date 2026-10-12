@@ -23,6 +23,10 @@
 
 A long-running process: register as an Octo bot → connect over WebSocket to receive messages → run a coding task with local Codex → post the reply back. Supports DM / group (@mention) / community topics, multi-turn conversations, multiple bots in one process, and config hot-reload.
 
+Group conversations fetch Octo's server `GROUP.md`; topic conversations fetch their own `THREAD.md` without falling back to the parent group. The per-bot memory cache expires after 30 seconds. Self-authored server update/delete notifications invalidate or clear the relevant cache immediately; events from other senders cannot modify it. A fetch failure omits server context and never blocks a reply. Server documents are bounded, escaped user-prompt context, not trusted system instructions. They are included again on resumed turns and stale-session retries. Editing the document in Octo is therefore reflected on the next conversation turn after notification (or cache expiry), without restarting the bot.
+
+The existing operator-only `groupConfigDir/<channelId>.md` remains a separate, trusted local instruction override, reread each turn. It is not a server document cache and is not uploaded to Octo. This change adds server document consumption, not management/write tools.
+
 **Headline feature — IM ↔ terminal Codex interop (opt-in):** each bot conversation maps to a Codex thread. With sharing enabled, you can resume a bot's group conversation from your own terminal via `codex exec resume <threadId>`, and vice versa.
 
 ## Install

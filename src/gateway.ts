@@ -5,6 +5,7 @@
 import { WKSocket } from './octo/socket.js';
 import { registerBot, sendHeartbeat } from './octo/api.js';
 import { isAllowedWsUrl } from './url-policy.js';
+import { isConversationMdEvent } from './conversation-md.js';
 import type { Config } from './config.js';
 import type { BotMessage } from './octo/types.js';
 import { existsSync, writeFileSync, unlinkSync, readFileSync, mkdirSync } from 'node:fs';
@@ -321,7 +322,8 @@ export class OctoGateway {
     if (this._draining) return; // Q6: reject new messages during shutdown
     // The server authors preference notifications as this bot. Let the router
     // invalidate its cache; ordinary self echoes must still be filtered.
-    if (msg.from_uid === this.robotId && msg.payload.event?.type !== 'mention_pref_updated') return;
+    if (msg.from_uid === this.robotId && msg.payload.event?.type !== 'mention_pref_updated'
+      && !isConversationMdEvent(msg.payload.event?.type)) return;
     this.onMessage?.(msg);
   }
 
