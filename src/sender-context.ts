@@ -1,4 +1,4 @@
-import type { BotMessage } from './octo/types.js';
+import { ChannelType, type BotMessage } from './octo/types.js';
 import { safeSenderMetadata, type SafeText } from './prompt-safety.js';
 
 export function buildSenderContext(message: BotMessage, ownerUid: string): SafeText {
@@ -7,9 +7,11 @@ export function buildSenderContext(message: BotMessage, ownerUid: string): SafeT
     ? message.from_uid : null;
   const metadata = {
     from_uid: senderUid,
-    channel_id: message.channel_id && message.channel_id.length <= 512 ? message.channel_id : null,
-    channel_type: message.channel_type ?? 1,
-    is_owner: senderUid !== null && ownerUid.length > 0 && senderUid === ownerUid,
+    channel_id: typeof message.channel_id === 'string' && message.channel_id.length > 0
+      && message.channel_id.length <= 512 ? message.channel_id : null,
+    channel_type: [ChannelType.DM, ChannelType.Group, ChannelType.CommunityTopic].includes(message.channel_type!)
+      ? message.channel_type : null,
+    is_owner: senderUid !== null && typeof ownerUid === 'string' && ownerUid.length > 0 && senderUid === ownerUid,
   };
   return safeSenderMetadata(metadata);
 }

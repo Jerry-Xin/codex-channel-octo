@@ -16,6 +16,17 @@ function metadata(context: string) {
 }
 
 describe('trusted current sender context', () => {
+  it('fails closed for malformed runtime metadata without throwing or mislabeling a DM', () => {
+    const malformed = message({ from_uid: undefined, channel_type: undefined,
+      channel_id: { length: 1, note: 'x'.repeat(2000) } as unknown as string });
+    expect(metadata(buildSenderContext(malformed, undefined as unknown as string))).toEqual({
+      from_uid: null, channel_id: null, channel_type: null, is_owner: false,
+    });
+    expect(metadata(buildSenderContext(message({ from_uid: 12345 as unknown as string }), '12345')))
+      .toMatchObject({ from_uid: null, is_owner: false });
+    expect(metadata(buildSenderContext(message({ channel_type: 999 }), 's1_owner')).channel_type).toBeNull();
+  });
+
   it.each([ChannelType.DM, ChannelType.Group, ChannelType.CommunityTopic])('preserves transport identity for channel type %s', (channel_type) => {
     expect(metadata(buildSenderContext(message({ channel_type, channel_id: 'group____topic' }), 's1_owner'))).toEqual({
       from_uid: 's1_owner', channel_id: 'group____topic', channel_type, is_owner: true,
