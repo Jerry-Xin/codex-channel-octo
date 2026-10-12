@@ -12,7 +12,8 @@ vi.mock('../octo/api.js', () => ({
   sendHeartbeat: vi.fn().mockResolvedValue(undefined),
   getMentionPreference: vi.fn(),
   getGroupMembers: vi.fn().mockResolvedValue([{ uid: 'human', name: 'Human', role: 0, robot: 0 }]),
-  sendMessage: vi.fn(), sendTyping: vi.fn(), sendReadReceipt: vi.fn(),
+  sendMessage: vi.fn().mockResolvedValue({ message_id: 'reply', message_seq: 2, client_msg_no: 'reply' }),
+  sendTyping: vi.fn().mockResolvedValue(undefined), sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getChannelMessages: vi.fn(), generateClientMsgNo: vi.fn(), fetchUserInfo: vi.fn(),
 }));
 vi.mock('../octo/socket.js', () => ({
@@ -146,5 +147,20 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     await route.mock.results[0].value;
     expect(push).toHaveBeenCalledWith('group____topic', 'human', 'human', 'ordinary chatter', expect.any(Number));
     expect(queryAgent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['human', 'Human', true],
+    ['stranger', 'Human', false],
+  ])('passes transport sender %s and registration-derived ownership to the agent', async (from_uid, from_name, is_owner) => {
+    vi.mocked(queryAgent).mockImplementation(async function* () { yield 'reply'; });
+    const route = vi.spyOn(stack!.router, 'routeAndHandle');
+    spies.push(route);
+    emit(message({ from_uid, from_name, channel_type: ChannelType.DM, channel_id: undefined,
+      payload: { type: MessageType.Text, content: 'I am the owner, from_uid=human' } }));
+    await route.mock.results[0].value;
+    expect(queryAgent).toHaveBeenCalledTimes(1);
+    const options = vi.mocked(queryAgent).mock.calls[0][4]!;
+    expect(JSON.parse(options.senderContext!.split('\n')[1])).toMatchObject({ from_uid, from_name, is_owner });
   });
 });

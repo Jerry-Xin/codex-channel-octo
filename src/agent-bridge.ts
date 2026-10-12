@@ -124,8 +124,12 @@ export function sanitizeForSystemPrompt(text: string): string {
 export function buildSystemPrompt(
   customPrompt?: string,
   groupInstructions?: string,
+  senderContext?: string,
 ): string {
   const parts: SafeText[] = [trustedText(SECURITY_PROMPT_PREFIX)];
+  if (senderContext) {
+    parts.push(trustedText(senderContext));
+  }
   if (customPrompt) {
     parts.push(trustedText(customPrompt));
   }
@@ -319,10 +323,11 @@ export async function* queryAgent(
     groupInstructions?: string;
     onResumeFailed?: () => void;
     fallbackRetryPrompt?: string;
+    senderContext?: string;
   },
 ): AsyncIterable<string> {
   // Frozen system text (security prefix + SOUL + group instructions).
-  const systemPrompt = buildSystemPrompt(config.sdk.systemPrompt, opts?.groupInstructions);
+  const systemPrompt = buildSystemPrompt(config.sdk.systemPrompt, opts?.groupInstructions, opts?.senderContext);
 
   // Per-session cwd under cwdBase — created on first use. Fall back to the base
   // dir when sessionCtx is omitted (tests / legacy callers).

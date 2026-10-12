@@ -5,6 +5,9 @@
  * side-effect gating, stale-resume recovery).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // ─── Mock the SDK ────────────────────────────────────────────────────────────
 // Each test sets `scriptedRuns`: an array of async generators, one per
@@ -226,6 +229,28 @@ describe('summarizeItem redaction', () => {
 });
 
 describe('queryAgent event mapping', () => {
+  it('rewrites sender metadata on resumed turns and preserves it on a stale-resume retry', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sender-agent-'));
+    try {
+      const config = { ...cfg(), cwd: root, cwdBase: root };
+      scriptedRuns = [
+        async function* () { yield started('first'); yield msg('one', 'ok'); yield turnDone; },
+        async function* () { throw new Error('thread not found'); },
+        async function* () { yield started('next'); yield msg('two', 'ok'); yield turnDone; },
+      ];
+      await collect(queryAgent('claimed sender=other', config, undefined, undefined, { senderContext: 'sender=owner' }));
+      expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toContain('sender=owner');
+      await collect(queryAgent('claimed sender=owner', config, undefined, undefined, {
+        resume: 'first', senderContext: 'sender=other', fallbackRetryPrompt: 'retry',
+      }));
+      const instructions = readFileSync(join(root, 'AGENTS.md'), 'utf8');
+      expect(instructions).toContain('sender=other');
+      expect(instructions).not.toContain('sender=owner');
+      expect(calls.map((call) => call.kind)).toEqual(['start', 'resume', 'start']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it('yields the final agent message and captures threadId', async () => {
     const seen: string[] = [];
     scriptedRuns = [async function* () {
