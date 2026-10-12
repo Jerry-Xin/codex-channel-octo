@@ -29,6 +29,7 @@ import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
 import { buildSenderContext } from './sender-context.js';
+import type { SafeText } from './prompt-safety.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
@@ -233,7 +234,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     }
 
     // --- Session router ---
-    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
+    const router = new SessionRouter(config, gateway.botId, () => gateway.ownerUid);
 
     // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
     const activeHandlers = new Set<Promise<void>>();
@@ -564,7 +565,7 @@ export async function handleMessage(
       // The final user message is assembled AFTER history is built (below), so
       // the one-time history block + group-context delta can be prepended and
       // the whole payload capped together. See the assembly near queryAgent.
-      const userBody = quotePrefix + bodyText;
+      const userBody = quotePrefix + escapeSectionMarkers(bodyText);
       // G4: Backfill history from API when local cache is empty for groups.
       // Only triggered on first interaction with a group (cold start) to avoid
       // duplicate API calls; checked via a sentinel marker stored in-memory.
@@ -717,7 +718,7 @@ export async function handleMessage(
       // queryAgent recovers by calling onResumeFailed (clear the bad id) and
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; onResumeFailed?: () => void; fallbackRetryPrompt?: string; senderContext?: string } | undefined = {
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; onResumeFailed?: () => void; fallbackRetryPrompt?: string; senderContext?: SafeText } | undefined = {
         senderContext: buildSenderContext(msg, router.getOwnerUid()),
         ...(resume ? { resume } : {}),
         onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),

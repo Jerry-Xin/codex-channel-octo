@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { trustedText } from '../prompt-safety.js';
 
 // ─── Mock the SDK ────────────────────────────────────────────────────────────
 // Each test sets `scriptedRuns`: an array of async generators, one per
@@ -17,11 +18,12 @@ type Ev = Record<string, unknown>;
 let scriptedRuns: Array<() => AsyncGenerator<Ev>>;
 let runIdx: number;
 const calls: Array<{ kind: 'start' | 'resume'; resumeId?: string; opts?: Record<string, unknown> }> = [];
+const prompts: string[] = [];
 
 function makeThread() {
   return {
     async runStreamed(_prompt: string) {
-      void _prompt;
+      prompts.push(_prompt);
       const gen = scriptedRuns[runIdx++];
       if (!gen) throw new Error('no scripted run left');
       return { events: gen() };
@@ -94,6 +96,7 @@ beforeEach(() => {
   scriptedRuns = [];
   runIdx = 0;
   calls.length = 0;
+  prompts.length = 0;
 });
 
 describe('buildCodexEnv', () => {
@@ -229,7 +232,7 @@ describe('summarizeItem redaction', () => {
 });
 
 describe('queryAgent event mapping', () => {
-  it('rewrites sender metadata on resumed turns and preserves it on a stale-resume retry', async () => {
+  it('carries current identity in resumed and fresh-retry prompts, not the shared instruction file', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sender-agent-'));
     try {
       const config = { ...cfg(), cwd: root, cwdBase: root };
@@ -238,18 +241,57 @@ describe('queryAgent event mapping', () => {
         async function* () { throw new Error('thread not found'); },
         async function* () { yield started('next'); yield msg('two', 'ok'); yield turnDone; },
       ];
-      await collect(queryAgent('claimed sender=other', config, undefined, undefined, { senderContext: 'sender=owner' }));
-      expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toContain('sender=owner');
+      await collect(queryAgent('claimed sender=other', config, undefined, undefined, { senderContext: trustedText('sender=owner') }));
+      expect(prompts[0]).toContain('sender=owner');
+      const initialInstructions = readFileSync(join(root, 'AGENTS.md'), 'utf8');
+      expect(initialInstructions).not.toContain('sender=owner');
       await collect(queryAgent('claimed sender=owner', config, undefined, undefined, {
-        resume: 'first', senderContext: 'sender=other', fallbackRetryPrompt: 'retry',
+        resume: 'first', senderContext: trustedText('sender=other'), fallbackRetryPrompt: 'retry',
       }));
       const instructions = readFileSync(join(root, 'AGENTS.md'), 'utf8');
-      expect(instructions).toContain('sender=other');
+      expect(instructions).toBe(initialInstructions);
+      expect(prompts[1]).toContain('sender=other');
+      expect(prompts[2]).toContain('sender=other');
       expect(instructions).not.toContain('sender=owner');
       expect(calls.map((call) => call.kind)).toEqual(['start', 'resume', 'start']);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('keeps each sender isolated when a timed-out shared-cwd turn recovers after another speaker', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sender-concurrent-'));
+    let releaseFirst!: () => void;
+    const interrupted = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    try {
+      const config = { ...cfg(), cwd: root, cwdBase: root };
+      scriptedRuns = [
+        async function* () { yield started('stranger-thread'); await interrupted; throw new Error('stream disconnected before completion'); },
+        async function* () { yield started('owner-thread'); yield msg('owner', 'ok'); yield turnDone; },
+        async function* () { yield msg('recovered', 'ok'); yield turnDone; },
+      ];
+      const first = collect(queryAgent('first', config, undefined, undefined, { senderContext: trustedText('sender=stranger') }));
+      await vi.waitFor(() => expect(prompts).toHaveLength(1));
+      await collect(queryAgent('second', config, undefined, undefined, { senderContext: trustedText('sender=owner') }));
+      releaseFirst();
+      await first;
+      expect(prompts).toHaveLength(3);
+      expect(prompts[0]).toContain('sender=stranger');
+      expect(prompts[1]).toContain('sender=owner');
+      expect(prompts[2]).toContain('sender=stranger');
+      expect(prompts[2]).not.toContain('sender=owner');
+      expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).not.toContain('sender=owner');
+    } finally {
+      releaseFirst();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('still sends current identity when instruction refresh fails in a read-only turn', async () => {
+    scriptedRuns = [async function* () { yield started('read-only'); yield msg('one', 'ok'); yield turnDone; }];
+    const config = { ...cfg(), cwd: '/dev/null/ws', cwdBase: '/dev/null/ws' };
+    await collect(queryAgent('hello', config, undefined, undefined, { senderContext: trustedText('sender=current') }));
+    expect(prompts[0]).toContain('sender=current');
   });
   it('yields the final agent message and captures threadId', async () => {
     const seen: string[] = [];

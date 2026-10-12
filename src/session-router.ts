@@ -53,7 +53,7 @@ export class SessionRouter {
   private readonly config: Config;
   private readonly robotId: string;
   /** G18: owner_uid from registerBot. Stored for future permission model. */
-  private readonly ownerUid: string;
+  private readonly ownerUid: string | (() => string);
   private readonly inboundQueues = new Map<string, Promise<void>>();
   private readonly tokenBuckets = new Map<string, TokenBucket>();
   /** G20: per-user buckets keyed by from_uid alone (cross-channel rate limit). */
@@ -66,7 +66,7 @@ export class SessionRouter {
   private readonly knownBotUids = new Set<string>();
   private readonly mentionPreferences: MentionPreferences;
 
-  constructor(config: Config, robotId: string, ownerUid = '') {
+  constructor(config: Config, robotId: string, ownerUid: string | (() => string) = '') {
     this.config = config;
     this.robotId = robotId;
     this.ownerUid = ownerUid;
@@ -95,7 +95,7 @@ export class SessionRouter {
 
   /** G18: owner_uid stored from registerBot. Used by future permission model. */
   getOwnerUid(): string {
-    return this.ownerUid;
+    return typeof this.ownerUid === 'function' ? this.ownerUid() : this.ownerUid;
   }
 
   /**
