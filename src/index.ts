@@ -28,6 +28,7 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
+import { canLoadPrivateMemory, loadPrivateMemory, privateMemorySessionKey } from './private-memory.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
@@ -246,7 +247,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
       // Match the gateway's self-echo guard: server preference notifications
       // authored as this bot must reach the router to invalidate its cache.
       if (msg.from_uid === gateway.botId && msg.payload.event?.type !== 'mention_pref_updated') return;
-      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
+      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, () => gateway.ownerUid)
         .catch((err) => {
           console.error(`[codex-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
         })
@@ -304,6 +305,7 @@ export async function handleMessage(
   groupContext: GroupContext,
   streamRelay: StreamRelay,
   botId: string,
+  currentOwner: () => string = () => '',
 ): Promise<void> {
   const channelId = msg.channel_id ?? '';
   const channelType = msg.channel_type ?? ChannelType.DM;
@@ -315,7 +317,10 @@ export async function handleMessage(
   let wasProcessed = false;
   const routeResult = await router.routeAndHandle(msg, async (result) => {
     wasProcessed = true;
-    const { sessionKey } = result;
+    const ownerUid = currentOwner();
+    const eligibleForMemory = canLoadPrivateMemory(config, msg, ownerUid);
+    const sessionKey = config.privateMemory?.enabled === true
+      ? privateMemorySessionKey(result.sessionKey, eligibleForMemory) : result.sessionKey;
 
     try {
       // --- Session ---
@@ -563,7 +568,7 @@ export async function handleMessage(
       // The final user message is assembled AFTER history is built (below), so
       // the one-time history block + group-context delta can be prepended and
       // the whole payload capped together. See the assembly near queryAgent.
-      const userBody = quotePrefix + bodyText;
+      const userBody = quotePrefix + escapeSectionMarkers(bodyText);
       // G4: Backfill history from API when local cache is empty for groups.
       // Only triggered on first interaction with a group (cold start) to avoid
       // duplicate API calls; checked via a sentinel marker stored in-memory.
@@ -716,7 +721,7 @@ export async function handleMessage(
       // queryAgent recovers by calling onResumeFailed (clear the bad id) and
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; onResumeFailed?: () => void; fallbackRetryPrompt?: string } | undefined = {
+      let sessionOpts: Parameters<typeof queryAgent>[4] = {
         ...(resume ? { resume } : {}),
         onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
         ...(resume
@@ -737,6 +742,9 @@ export async function handleMessage(
         }
       }
 
+      if (eligibleForMemory) {
+        sessionOpts = { ...(sessionOpts ?? {}), privateMemoryContext: loadPrivateMemory(config, msg, ownerUid) };
+      }
       const rawChunks = queryAgent(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);
 
       // Tee the generator: collect full text while streaming to Octo

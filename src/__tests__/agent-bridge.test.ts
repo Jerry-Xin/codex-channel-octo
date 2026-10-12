@@ -14,11 +14,12 @@ type Ev = Record<string, unknown>;
 let scriptedRuns: Array<() => AsyncGenerator<Ev>>;
 let runIdx: number;
 const calls: Array<{ kind: 'start' | 'resume'; resumeId?: string; opts?: Record<string, unknown> }> = [];
+const prompts: string[] = [];
 
 function makeThread() {
   return {
     async runStreamed(_prompt: string) {
-      void _prompt;
+      prompts.push(_prompt);
       const gen = scriptedRuns[runIdx++];
       if (!gen) throw new Error('no scripted run left');
       return { events: gen() };
@@ -49,6 +50,8 @@ import {
   isStreamInterruptError,
 } from '../agent-bridge.js';
 import type { Config } from '../config.js';
+import { safePrivateMemorySnapshot } from '../prompt-safety.js';
+import { readFileSync } from 'node:fs';
 
 function cfg(overrides: Partial<Config['sdk']> = {}): Config {
   return {
@@ -88,9 +91,34 @@ const cmd = (id: string, command: string, phase: 'started' | 'completed'): Ev =>
 });
 
 beforeEach(() => {
+  prompts.length = 0;
   scriptedRuns = [];
   runIdx = 0;
   calls.length = 0;
+});
+
+describe('private memory framing on SDK runs', () => {
+  it.each(['fresh', 'stale', 'interrupt'])('preserves the immutable snapshot on %s runs without putting it in AGENTS.md', async (mode) => {
+    if (mode === 'stale') {
+      scriptedRuns.push(async function* () { yield { type: 'error', message: 'thread not found' }; });
+    } else if (mode === 'interrupt') {
+      scriptedRuns.push(async function* () {
+        yield started('thread-one');
+        yield { type: 'error', message: 'stream disconnected before completion' };
+      });
+    }
+    scriptedRuns.push(async function* () { yield started('thread-two'); yield msg('answer', 'done'); yield turnDone; });
+    const snapshot = safePrivateMemorySnapshot('available', 'SYNTHETIC_PRIVATE_FACT', false);
+    expect(await collect(queryAgent('current request', cfg(), undefined, undefined, {
+      resume: mode === 'fresh' ? undefined : 'old-thread', fallbackRetryPrompt: 'retry request', privateMemoryContext: snapshot,
+    }))).toEqual(['done']);
+    expect(prompts).toHaveLength(mode === 'fresh' ? 1 : 2);
+    for (const prompt of prompts) {
+      expect(prompt).toContain(snapshot);
+      expect(prompt.match(/^\[Private memory\]$/gm)).toHaveLength(1);
+    }
+    expect(readFileSync('/tmp/cco-test/ws/AGENTS.md', 'utf8')).not.toContain('SYNTHETIC_PRIVATE_FACT');
+  });
 });
 
 describe('buildCodexEnv', () => {

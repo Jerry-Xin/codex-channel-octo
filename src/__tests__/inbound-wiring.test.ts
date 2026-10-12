@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,7 +12,7 @@ vi.mock('../octo/api.js', () => ({
   sendHeartbeat: vi.fn().mockResolvedValue(undefined),
   getMentionPreference: vi.fn(),
   getGroupMembers: vi.fn().mockResolvedValue([{ uid: 'human', name: 'Human', role: 0, robot: 0 }]),
-  sendMessage: vi.fn(), sendTyping: vi.fn(), sendReadReceipt: vi.fn(),
+  sendMessage: vi.fn().mockResolvedValue(undefined), sendTyping: vi.fn().mockResolvedValue(undefined), sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getChannelMessages: vi.fn(), generateClientMsgNo: vi.fn(), fetchUserInfo: vi.fn(),
 }));
 vi.mock('../octo/socket.js', () => ({
@@ -24,6 +24,7 @@ vi.mock('../agent-bridge.js', () => ({ queryAgent: vi.fn(), isStreamInterruptErr
 
 import { startBot, type BotStack } from '../index.js';
 import { GroupContext } from '../group-context.js';
+import { OctoGateway } from '../gateway.js';
 import { queryAgent } from '../agent-bridge.js';
 import { getMentionPreference, sendMessage } from '../octo/api.js';
 import { WKSocket } from '../octo/socket.js';
@@ -47,8 +48,11 @@ describe('production socket → gateway → onInbound → router wiring', () => 
   beforeEach(async () => {
     vi.clearAllMocks();
     root = mkdtempSync(join(tmpdir(), 'octo-inbound-wiring-'));
+    mkdirSync(join(root, 'test'));
+    writeFileSync(join(root, 'test', 'MEMORY.md'), 'SYNTHETIC_OWNER_MEMORY');
     stack = await startBot({
       botId: 'test', apiUrl: 'https://octo.example', botToken: 'test-token',
+      baseDir: root, privateMemory: { enabled: true },
       cwd: join(root, 'workspace'), dataDir: join(root, 'data'), sdk: {},
       rateLimit: { maxPerMinute: 100 },
       botBlocklist: ['blocked_bot'],
@@ -65,6 +69,74 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     stack = undefined;
     for (const spy of spies.splice(0)) spy.mockRestore();
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it('loads owner DM memory, resumes its isolated thread, and stops using that thread after ownership changes', async () => {
+    vi.mocked(queryAgent).mockImplementation(async function* (_prompt, _config, _session, _progress, options) {
+      options?.onSessionId?.('sdk-private-thread');
+      yield 'answer';
+    });
+    const route = vi.spyOn(stack!.router, 'routeAndHandle');
+    spies.push(route);
+    const direct = message({ channel_id: 'human', channel_type: ChannelType.DM,
+      payload: { type: MessageType.Text, content: 'hello' } });
+    emit(direct);
+    await route.mock.results[0].value;
+    const first = vi.mocked(queryAgent).mock.calls[0];
+    expect(first[4]?.privateMemoryContext).toContain('SYNTHETIC_OWNER_MEMORY');
+    expect(first[2]?.sessionKey).toContain('private-memory');
+    emit({ ...direct, message_id: 'two', message_seq: 2 });
+    await route.mock.results[1].value;
+    expect(vi.mocked(queryAgent).mock.calls[1][4]?.resume).toBe('sdk-private-thread');
+    const owner = vi.spyOn(OctoGateway.prototype, 'ownerUid', 'get').mockReturnValue('new-owner');
+    spies.push(owner);
+    emit({ ...direct, message_id: 'three', message_seq: 3 });
+    await route.mock.results[2].value;
+    const revoked = vi.mocked(queryAgent).mock.calls[2];
+    expect(revoked[4]?.privateMemoryContext).toBeUndefined();
+    expect(revoked[4]?.resume).toBeUndefined();
+    expect(revoked[2]?.sessionKey).not.toBe(first[2]?.sessionKey);
+  });
+
+  it.each([ChannelType.Group, ChannelType.CommunityTopic, ChannelType.DM])('excludes memory from non-owner channel %s', async (channel_type) => {
+    vi.mocked(queryAgent).mockImplementation(async function* () { yield 'answer'; });
+    vi.mocked(getMentionPreference).mockResolvedValue(true);
+    const route = vi.spyOn(stack!.router, 'routeAndHandle');
+    spies.push(route);
+    emit(message({ from_uid: 'stranger', channel_type, channel_id: channel_type === ChannelType.Group ? 'group' : 'group____topic',
+      payload: { type: MessageType.Text, content: 'hello', mention: { uids: ['test_bot'] } } }));
+    await route.mock.results[0].value;
+    expect(queryAgent).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(queryAgent).mock.calls[0][4]?.privateMemoryContext).toBeUndefined();
+    expect(vi.mocked(queryAgent).mock.calls[0][0]).not.toContain('SYNTHETIC_OWNER_MEMORY');
+  });
+
+  it('retains the note across an actual bot-stack shutdown/restart and /reset', async () => {
+    vi.mocked(queryAgent).mockImplementation(async function* (_prompt, _config, _session, _progress, options) {
+      options?.onSessionId?.('stored-private-thread');
+      yield 'answer';
+    });
+    const send = async (content: string, sequence: number) => {
+      const route = vi.spyOn(stack!.router, 'routeAndHandle');
+      emit(message({ message_id: `restart-${sequence}`, message_seq: sequence,
+        channel_id: 'human', channel_type: ChannelType.DM, payload: { type: MessageType.Text, content } }));
+      await route.mock.results[0].value;
+      route.mockRestore();
+    };
+    await send('remember', 1);
+    await stack!.shutdown();
+    stack = await startBot({ botId: 'test', baseDir: root, apiUrl: 'https://octo.example', botToken: 'test-token',
+      cwd: join(root, 'workspace'), dataDir: join(root, 'data'), sdk: {}, privateMemory: { enabled: true },
+      rateLimit: { maxPerMinute: 100 }, context: { maxContextChars: 6000, historyLimit: 40 } }, true);
+    await stack.connect();
+    emit = vi.mocked(WKSocket).mock.calls.at(-1)![0].onMessage!;
+    await send('recall after restart', 2);
+    expect(vi.mocked(queryAgent).mock.calls.at(-1)![4]?.privateMemoryContext).toContain('SYNTHETIC_OWNER_MEMORY');
+    expect(vi.mocked(queryAgent).mock.calls.at(-1)![4]?.resume).toBe('stored-private-thread');
+    await send('/reset', 3);
+    await send('recall after reset', 4);
+    expect(vi.mocked(queryAgent).mock.calls.at(-1)![4]?.resume).toBeUndefined();
+    expect(vi.mocked(queryAgent).mock.calls.at(-1)![4]?.privateMemoryContext).toContain('SYNTHETIC_OWNER_MEMORY');
   });
 
   it.each([true, false])('immediately invalidates a self-authored toggle (previously %s) without caching or dispatching it', async (effective) => {

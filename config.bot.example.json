@@ -1,6 +1,8 @@
 {
   "_comment": "PER-BOT config — install at ~/.codex-channel-octo/<id>/config.json (the <id> must match an entry in the global config's `bots` list; for a single bot use id 'default'). This file is the highest-priority layer: it overrides both the inline bots[] entry and the global shared fields. It holds the bot's REQUIRED botToken. The bot's directories are derived automatically as siblings of this file: ./data, ./workspace, ./codex-home. Drop a ./SOUL.md next to this file to give the bot a personality (it overrides sdk.systemPrompt).",
   "botToken": "bf_YOUR_BOT_TOKEN",
+  "_comment_privateMemory": "Opt-in MEMORY.md beside SOUL.md, loaded only for the current registration owner's DMs. Groups/topics/other DMs receive none. Bounded background data, never shared AGENTS.md. Does not restrict filesystem tools under danger-full-access.",
+  "privateMemory": { "enabled": false, "maxBytes": 16384 },
 
   "_comment_overrides": "Any of these optional fields override the global config for THIS bot only:",
   "_comment_apiUrl": "apiUrl — override the Octo API base for this bot.",

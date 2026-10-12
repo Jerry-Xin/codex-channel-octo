@@ -94,6 +94,16 @@ IM 输入是**不可信**的,权限边界是 **sandbox**,不是 prompt:
 - 安全前缀(防注入)写入每会话沙箱的 `AGENTS.md` 并在 prompt 顶部重申(纵深防御,但仅软约束)。
 - 每 bot 独立 `CODEX_HOME`,IM 内容默认不落入个人 `~/.codex`。
 
+### 私密 MEMORY.md（默认关闭）
+
+将人工维护的 `MEMORY.md` 放在 `<baseDir>/<botId>/SOUL.md` 同级目录，在全局或单 bot 配置中设置 `"privateMemory": { "enabled": true, "maxBytes": 16384 }`。单 bot 字段覆盖 inline/global 字段；`maxBytes` 必须是 1～65536 的整数。配置变化需重启，文件修改或删除在下一次符合条件的请求中重新读取。
+
+仅当传输层明确为 DM，且发送者 UID 精确匹配**当前**注册信息的 `owner_uid` 时读取。群、话题、非主人及未知身份不读取该文件。快照作为有大小限制的非可信 JSON 背景注入每次符合条件的 SDK 调用，包括重试/恢复，不写入共享 `AGENTS.md`。缺失或无法读取时发送背景状态而非报错阻止回复；拒绝文件符号链接和非普通文件。当前阶段不加载 `memory/` 日记、不提供搜索或写入、不实现压缩钩子；续接线程中暂不去重快照。
+
+启用后普通会话和私密记忆会话使用不同命名空间的历史、SDK 线程和工作目录。启用/关闭会切换历史作用域但不删除旧记录；主人变化后原主人不再复用私密线程。`/reset` 只重置当前作用域，不删除 `MEMORY.md`。
+
+**边界说明：**这是适配器注入过滤，不是文件系统权限控制。`read-only` 不一定禁止读取 cwd 以外的文件，`danger-full-access` 更不提供隔离；对不可信用户必须另有容器/文件权限边界。不要跨不相关用户共享个人 Codex home，SDK 的历史存储不在本功能保护范围内。
+
 ### Docker 专用配置
 
 在专用 Docker 容器中，可使用 [`config.bot.docker.example.json`](./config.bot.docker.example.json) 作为该 bot 的配置，默认选择 `danger-full-access`。已有配置只需在 `sdk` 内设置：

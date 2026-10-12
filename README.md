@@ -99,6 +99,16 @@ IM input is **untrusted**; the permission boundary is the **sandbox**, not the p
 - A non-overridable security prefix (anti-injection) is written into each session's sandbox `AGENTS.md` and restated atop the prompt (defense in depth, but only a soft constraint).
 - Each bot has its own `CODEX_HOME`, so IM content does not land in your personal `~/.codex` by default.
 
+### Private MEMORY.md (opt-in)
+
+Place an operator-maintained `MEMORY.md` beside `<baseDir>/<botId>/SOUL.md` and set `"privateMemory": { "enabled": true, "maxBytes": 16384 }` in the global or per-bot config (per-bot fields override inline/global fields). Disabled by default; `maxBytes` accepts integers from 1 to 65536. Configuration changes require a restart; eligible turns re-read the file, so note edits/deletion take effect on the next turn.
+
+Only an explicit DM with a transport sender matching the **current** registration `owner_uid` is eligible. Groups, topics, other senders and unknown identities cause no memory file read. The bounded snapshot is framed as untrusted JSON background in every eligible SDK run, including recovery; it is never written to shared `AGENTS.md`. Missing/unreadable files produce a safe absence/unavailability notice; file symlinks and non-regular files are rejected. This first milestone does not load `memory/` daily notes, search, write notes, or add compaction hooks.
+
+When enabled, ordinary/private-memory conversations use separate namespaced histories, SDK threads and working directories. Enabling/disabling starts a different history scope without deleting older records. Ownership changes select the ordinary scope for former owners, not their prior private-memory thread. `/reset` clears the current scope but never deletes `MEMORY.md`. Snapshots are repeated deliberately in this initial implementation; they are byte-bounded, not deduplicated across a resumed thread.
+
+**Privacy boundary:** this filters adapter injection, not arbitrary filesystem access. A read-only sandbox may still permit reads outside cwd; `danger-full-access` removes filesystem isolation. Do not expose private files to untrusted users without an external filesystem/container boundary. Also do not share an operator's Codex home across unrelated users: the SDK's transcript storage is outside this feature's scope.
+
 ### Dedicated Docker configuration
 
 Use [`config.bot.docker.example.json`](./config.bot.docker.example.json) for a dedicated Docker container. That template defaults to `danger-full-access`. For an existing bot, set this field inside `sdk`:

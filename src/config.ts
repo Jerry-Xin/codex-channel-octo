@@ -68,6 +68,7 @@ export interface Config {
    * per-session cwd sandbox (which the agent can write). Unset = feature off.
    */
   groupConfigDir?: string;
+  privateMemory?: { enabled?: boolean; maxBytes?: number };
   sdk: {
     /** Codex model id (e.g. gpt-5.5). Omitted → codex default. */
     model?: string;
@@ -232,12 +233,14 @@ export interface BotOverride {
   apiUrl?: string;
   model?: string;
   systemPrompt?: string;
+  privateMemory?: Config['privateMemory'];
   botBlocklist?: string[];
   allowedBotUids?: string[];
   mentionFreeGroups?: string[];
 }
 
 type PartialConfig = {
+  privateMemory?: Config['privateMemory'];
   botToken?: string;
   apiUrl?: string;
   groupConfigDir?: string;
@@ -322,7 +325,17 @@ function readConfigFile(configFilePath: string): PartialConfig {
   return cleaned as PartialConfig;
 }
 
+function assertPrivateMemory(value: Config['privateMemory']): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || (value.enabled !== undefined && typeof value.enabled !== 'boolean')
+    || (value.maxBytes !== undefined && (!Number.isInteger(value.maxBytes) || value.maxBytes < 1 || value.maxBytes > 65_536))) {
+    throw new Error('Invalid privateMemory: enabled must be boolean and maxBytes an integer from 1 to 65536');
+  }
+}
+
 function mergeConfig(base: Config, override: PartialConfig): Config {
+  assertPrivateMemory(override.privateMemory);
   return {
     botToken: override.botToken ?? base.botToken,
     apiUrl: override.apiUrl ?? base.apiUrl,
@@ -334,6 +347,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     dataDir: base.dataDir,
     memoryBase: base.memoryBase,
     groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
+    privateMemory: { enabled: false, maxBytes: 16_384, ...base.privateMemory, ...override.privateMemory },
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -554,6 +568,8 @@ export function resolveBotConfigs(config: Config): Config[] {
 
     const apiUrl = perBotFile.apiUrl ?? bot.apiUrl ?? config.apiUrl;
     const model = perBotFile.sdk?.model ?? bot.model ?? config.sdk.model;
+    assertPrivateMemory(bot.privateMemory);
+    assertPrivateMemory(perBotFile.privateMemory);
 
     const resolved: Config = {
       ...config,
@@ -571,6 +587,8 @@ export function resolveBotConfigs(config: Config): Config[] {
       mentionFreeGroups:
         perBotFile.mentionFreeGroups ?? bot.mentionFreeGroups ?? config.mentionFreeGroups,
       groupConfigDir: perBotFile.groupConfigDir ?? config.groupConfigDir,
+      privateMemory: { enabled: false, maxBytes: 16_384, ...config.privateMemory,
+        ...bot.privateMemory, ...perBotFile.privateMemory },
       sdk: {
         ...config.sdk,
         ...(perBotFile.sdk ?? {}),
