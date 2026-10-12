@@ -565,7 +565,7 @@ export async function handleMessage(
       // The final user message is assembled AFTER history is built (below), so
       // the one-time history block + group-context delta can be prepended and
       // the whole payload capped together. See the assembly near queryAgent.
-      const userBody = quotePrefix + bodyText;
+      const userBody = quotePrefix + escapeSectionMarkers(bodyText);
       // G4: Backfill history from API when local cache is empty for groups.
       // Only triggered on first interaction with a group (cold start) to avoid
       // duplicate API calls; checked via a sentinel marker stored in-memory.
@@ -653,12 +653,13 @@ export async function handleMessage(
       // only when there is no history. Later turns carry only the delta. The
       // cursor was already advanced above, so dropping the delta here does not
       // strand messages — history covers them and they must not be re-shown.
-      const serverMdContext = isGroup ? await router.getConversationMd(channelId, channelType) ?? '' : '';
-      const injectedContext = serverMdContext + (firstTurnHistory ? firstTurnHistory : groupContextBlock);
+      const serverMd = isGroup ? await router.prepareConversationMd(channelId, channelType, resume) : undefined;
+      const injectedContext = firstTurnHistory ? firstTurnHistory : groupContextBlock;
       const userContentForLLM = assembleUserMessage(
         injectedContext,
         userBody,
         MAX_USER_LLM_BYTES,
+        serverMd?.context,
       );
 
       // Pre-assemble the stale-resume RETRY prompt here, where `historyBlock` and
@@ -674,7 +675,7 @@ export async function handleMessage(
       // Only built when resuming — it's the sole consumer (sessionOpts below), so a
       // first turn (no resume) would otherwise assemble it just to discard it.
       const fallbackRetryPrompt = resume
-        ? assembleUserMessage(serverMdContext + historyBlock, userBody, MAX_USER_LLM_BYTES)
+        ? assembleUserMessage(historyBlock, userBody, MAX_USER_LLM_BYTES, serverMd?.retryContext)
         : undefined;
 
       // --- Query agent with structural role separation (Q3 fix) ---
@@ -721,7 +722,13 @@ export async function handleMessage(
       // conversation isn't lost (and assembly happens exactly once — see above).
       let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; onResumeFailed?: () => void; fallbackRetryPrompt?: string } | undefined = {
         ...(resume ? { resume } : {}),
-        onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
+        onSessionId: (id: string) => {
+          store.setSdkSessionId(sessionKey, id);
+          if (serverMd && ((serverMd.context && userContentForLLM.includes(serverMd.context))
+            || (serverMd.retryContext && fallbackRetryPrompt?.includes(serverMd.retryContext)))) {
+            serverMd.commit(id);
+          }
+        },
         ...(resume
           ? {
               onResumeFailed: () => store.clearSdkSessionId(sessionKey),

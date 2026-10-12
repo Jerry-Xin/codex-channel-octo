@@ -207,8 +207,8 @@ function capBodyToBudget(body: string, maxBytes: number): string {
   return wasTruncated ? truncated + '\n[… user input truncated to cap]' : body;
 }
 
-export function assembleUserMessage(context: string, body: string, maxBytes: number): string {
-  if (!context) {
+export function assembleUserMessage(context: string, body: string, maxBytes: number, atomicContext = ''): string {
+  if (!context && !atomicContext) {
     return capBodyToBudget(body, maxBytes);
   }
   // Positive anchor (#132): the background context above is READ-ONLY; this line
@@ -218,14 +218,16 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   // The literal is the shared CURRENT_MESSAGE_ANCHOR so the emitter, the system
   // prompt, and the escape regex can never drift apart (#133 review).
   const anchor = `\n${CURRENT_MESSAGE_ANCHOR}\n`;
-  const anchored = anchor + body;
-  const bodyBytes = Buffer.byteLength(anchored, 'utf-8');
+  const current = anchor + body;
+  const bodyBytes = Buffer.byteLength(current, 'utf-8');
   if (bodyBytes >= maxBytes) {
     // Pathological: the body alone fills/overflows the budget. Drop context
     // entirely and cap the body — the current message still gets through.
     return capBodyToBudget(body, maxBytes);
   }
-  const contextBudget = maxBytes - bodyBytes;
+  const protectedContext = Buffer.byteLength(atomicContext, 'utf-8') <= maxBytes - bodyBytes ? atomicContext : '';
+  const anchored = protectedContext + current;
+  const contextBudget = maxBytes - bodyBytes - Buffer.byteLength(protectedContext, 'utf-8');
   const ctxBytes = Buffer.byteLength(context, 'utf-8');
   if (ctxBytes <= contextBudget) {
     return context + anchored;

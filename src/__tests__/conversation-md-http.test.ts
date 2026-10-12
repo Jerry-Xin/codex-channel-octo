@@ -36,7 +36,7 @@ afterEach(async () => {
 
 function event(type: string, channel_id: string, channel_type: ChannelType): BotMessage {
   return {
-    message_id: 'event', message_seq: 1, from_uid: 'bot', channel_id, channel_type,
+    message_id: 'event', message_seq: 1, from_uid: 'manager', channel_id, channel_type,
     timestamp: 1, payload: { type: MessageType.Text, event: { type } },
   };
 }
@@ -48,17 +48,20 @@ describe('real localhost HTTP → markdown cache', () => {
     expect(await cache.get('group____topic', ChannelType.CommunityTopic)).toContain('initial server thread');
     groupContent = 'updated server group';
     threadContent = 'updated server thread';
-    cache.onEvent(event('group_md_updated', 'group', ChannelType.Group), 'bot');
-    cache.onEvent(event('thread_md_updated', 'group____topic', ChannelType.CommunityTopic), 'bot');
+    cache.onEvent(event('group_md_updated', 'group', ChannelType.Group));
+    cache.onEvent(event('thread_md_updated', 'group____topic', ChannelType.CommunityTopic));
     expect(await cache.get('group', ChannelType.Group)).toContain('updated server group');
     expect(await cache.get('group____topic', ChannelType.CommunityTopic)).toContain('updated server thread');
-    cache.onEvent(event('thread_md_deleted', 'group____topic', ChannelType.CommunityTopic), 'bot');
+    await new Promise((resolve) => setTimeout(resolve, 1001));
+    threadContent = '';
+    cache.onEvent(event('thread_md_deleted', 'group____topic', ChannelType.CommunityTopic));
     expect(await cache.get('group____topic', ChannelType.CommunityTopic)).toBeUndefined();
     expect(paths).toEqual([
       '/v1/bot/groups/group/md', '/v1/bot/groups/group/threads/topic/md',
       '/v1/bot/groups/group/md', '/v1/bot/groups/group/threads/topic/md',
+      '/v1/bot/groups/group/threads/topic/md',
     ]);
-    expect(authorizations).toEqual(Array(4).fill('Bearer fixture-token'));
+    expect(authorizations).toEqual(Array(5).fill('Bearer fixture-token'));
   });
 
   it.each([403, 404, 500])('omits unavailable HTTP %s documents instead of crashing the conversation', async (httpStatus) => {

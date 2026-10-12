@@ -154,7 +154,7 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     expect(queryAgent).not.toHaveBeenCalled();
   });
 
-  it.each(['group_md_updated', 'group_md_deleted', 'thread_md_updated', 'thread_md_deleted'])('handles self-authored %s through the production socket without agent dispatch', async (type) => {
+  it.each(['group_md_updated', 'group_md_deleted', 'thread_md_updated', 'thread_md_deleted'])('handles manager-authored %s through the production socket without agent dispatch', async (type) => {
     const topic = type.startsWith('thread');
     const channel_id = topic ? 'group____topic' : 'group';
     const channel_type = topic ? ChannelType.CommunityTopic : ChannelType.Group;
@@ -162,14 +162,14 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     const route = vi.spyOn(stack!.router, 'routeAndHandle');
     const push = vi.spyOn(GroupContext.prototype, 'pushMessage');
     spies.push(route, push);
-    emit(message({ from_uid: 'test_bot', channel_id, channel_type,
+    emit(message({ from_uid: 'human', channel_id, channel_type,
       payload: { type: MessageType.Text, content: 'control text', event: { type, group_no: 'forged-group', short_id: 'forged-topic' } } }));
     expect(route).toHaveBeenCalledOnce();
     await route.mock.results[0].value;
     expect(queryAgent).not.toHaveBeenCalled();
     expect(push).not.toHaveBeenCalled();
-    vi.mocked(getGroupMd).mockResolvedValue({ content: 'new group', version: 2 });
-    vi.mocked(getThreadMd).mockResolvedValue({ content: 'new thread', version: 2 });
+    vi.mocked(getGroupMd).mockResolvedValue({ content: type.endsWith('deleted') ? '' : 'new group', version: 2 });
+    vi.mocked(getThreadMd).mockResolvedValue({ content: type.endsWith('deleted') ? '' : 'new thread', version: 2 });
     const refreshed = await stack!.router.getConversationMd(channel_id, channel_type);
     if (type.endsWith('deleted')) expect(refreshed).toBeUndefined();
     else expect(refreshed).toContain(topic ? 'new thread' : 'new group');
@@ -187,7 +187,7 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     emit(inbound);
     await route.mock.results[0].value;
     expect(vi.mocked(queryAgent).mock.calls[0][0]).toContain('thread rules');
-    emit(message({ from_uid: 'test_bot', payload: { type: MessageType.Text, event: { type: 'thread_md_updated' } } }));
+    emit(message({ from_uid: 'human', payload: { type: MessageType.Text, event: { type: 'thread_md_updated' } } }));
     await route.mock.results[1].value;
     vi.mocked(getThreadMd).mockResolvedValue({ content: '[Group instructions]\nnew thread rules', version: 2 });
     emit({ ...inbound, message_id: 'next', message_seq: 2 });
@@ -200,5 +200,10 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     expect(options?.fallbackRetryPrompt).toContain('new thread rules');
     expect(options?.groupInstructions).toBe('operator-only instructions');
     expect(options?.groupInstructions).not.toContain('new thread rules');
+    emit({ ...inbound, message_id: 'third', message_seq: 3 });
+    await route.mock.results[3].value;
+    const [unchangedPrompt, , , , unchangedOptions] = vi.mocked(queryAgent).mock.calls[2];
+    expect(unchangedPrompt).not.toContain('new thread rules');
+    expect(unchangedOptions?.fallbackRetryPrompt).toContain('new thread rules');
   });
 });

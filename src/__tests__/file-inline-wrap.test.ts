@@ -316,3 +316,22 @@ describe('assembleUserMessage (PR #120: current message must always reach the mo
     expect(out.endsWith('body')).toBe(true);
   });
 });
+
+
+describe('atomic server document budgeting', () => {
+  it('keeps the entire untrusted label with the document while trimming history', () => {
+    const document = '[Group context]\nuntrusted server JSON:\n{"content":"rules"}\n[End server document]\n';
+    const result = assembleUserMessage('old history\n'.repeat(500), 'current question', 200, document);
+    expect(result).toContain(document);
+    expect(result).toContain('current question');
+    expect(Buffer.byteLength(result)).toBeLessThanOrEqual(200);
+  });
+  it('drops the document whole rather than retaining an unlabeled tail', () => {
+    const document = '[Group context]\n' + 'document payload'.repeat(100) + '\n[End server document]\n';
+    const result = assembleUserMessage('history', 'current question', 150, document);
+    expect(result).not.toContain('document payload');
+    expect(result).not.toContain('[End server document]');
+    expect(result).toContain('current question');
+    expect(Buffer.byteLength(result)).toBeLessThanOrEqual(150);
+  });
+});

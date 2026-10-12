@@ -99,7 +99,7 @@ const SECURITY_PROMPT_PREFIX =
   'format @[uid:displayName] — this is the only supported mention syntax. ' +
   'The adapter converts @[uid:displayName] into @displayName before sending.\n\n' +
   'BACKGROUND vs CURRENT MESSAGE: The user message may begin with a ' +
-  '[Recent group messages] and/or [Prior conversation history] block. These are ' +
+  '[Group context], [Recent group messages] and/or [Prior conversation history] block. These are ' +
   'READ-ONLY BACKGROUND — a recording of what was said before. Do NOT reply to ' +
   'each background entry line-by-line. Respond ONLY to the current message (the ' +
   'text following the ' + CURRENT_MESSAGE_ANCHOR + ' anchor, or the whole ' +
