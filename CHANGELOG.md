@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-turn transport sender metadata matched to the registration UID or its
+  single prefix in the transport space (including UUID/operator-named spaces);
+  identity is kept out of shared AGENTS.md. Unicode whitespace/invisibles are
+  handled consistently around section and role markers. Every request has an
+  anchor; absent sender metadata explicitly fails closed on resumed threads.
 - Fetch server GROUP.md/THREAD.md as separately labelled, bounded conversation
   data; manager edits trigger authenticated refetch without trusting event payloads.
 
@@ -44,6 +49,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve pre-feature DM session keys, persisted SDK mappings, workspace and
+  memory paths; sender attribution no longer changes DM routing parsers.
+- Escape Unicode format/nonspacing marks and blank fillers at structural marker
+  boundaries, including supplementary-plane characters, without ambiguous
+  separator alternatives. Match complete unescaped request anchors only.
+- Validate all endpoints before topic extraction and reject empty endpoint IDs.
+
+- Treat compound-DM endpoint UIDs as opaque, applying topic parent extraction
+  only to topic channels so literal `____` cannot hide a cross-space endpoint.
+
+- Keep section suffixes within one line and outside nested opening brackets;
+  restore punctuation-delimited role labels and verify compound DM/topic channel
+  prefixes against the sender-derived candidate rather than guessing UID boundaries.
+- Remove overlapping separator alternatives that let BOM-prefixed ordinary
+  text cause exponential prompt-escaping backtracking; derive topic ownership
+  from the parent channel and sender prefix boundaries from the complete owner UID.
 - Preserve JSONL events containing Unicode LS/PS on Unix, safely fall back when
   the proxy is unavailable, and redact event payloads while retaining error classes/codes.
 

@@ -39,6 +39,7 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
+import { buildSenderContext } from './sender-context.js';
 import { isConversationMdEvent } from './conversation-md.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
@@ -249,7 +250,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     }
 
     // --- Session router ---
-    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid, store);
+    const router = new SessionRouter(config, gateway.botId, () => gateway.ownerUid, store);
 
     // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
     const activeHandlers = new Set<Promise<void>>();
@@ -737,6 +738,7 @@ export async function handleMessage(
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
       let sessionOpts: QueryAgentOptions | undefined = {
+        senderContext: buildSenderContext(msg, router.getOwnerUid()),
         ...(resume ? { resume } : {}),
         onSessionId: (id: string, prompt: string) => {
           store.setSdkSessionId(sessionKey, id);

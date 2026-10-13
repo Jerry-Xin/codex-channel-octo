@@ -2,7 +2,7 @@
  * T26 — prompt framing snapshot. The strings passed to `runStreamed` for the
  * initial, stream-recovery and stale-resume fresh-retry attempts must stay
  * byte-identical to the pre-output-selection bridge. The digests below were
- * recorded from the baseline bridge (upstream main dd12980, after server-document framing) with this same
+ * recorded from the baseline bridge (upstream main c66504e, after sender-context framing) with this same
  * script; any edit to the framing changes them.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -85,13 +85,13 @@ describe('T26: prompt framing is byte-identical to baseline', () => {
     await drain({ resume: 'old', fallbackRetryPrompt: 'FALLBACK BODY', onResumeFailed: () => {} });
     expect(prompts).toHaveLength(3);
     const [initial, fresh, recovery] = prompts;
-    expect(initial.endsWith('\n\n---\n\nUSER BODY')).toBe(true);
-    expect(fresh.endsWith('\n\n---\n\nFALLBACK BODY')).toBe(true);
-    expect(recovery.endsWith('\n\n---\n\n上次回复因连接中断未完成。请基于你已经完成的工作，直接继续并给出最终结论，不要重复已执行过的步骤。')).toBe(true);
+    expect(initial.endsWith('\n\n---\n\n[Current message — respond to this ONLY]\nUSER BODY')).toBe(true);
+    expect(fresh.endsWith('\n\n---\n\n[Current message — respond to this ONLY]\nFALLBACK BODY')).toBe(true);
+    expect(recovery.endsWith('\n\n---\n\n[Current message — respond to this ONLY]\n上次回复因连接中断未完成。请基于你已经完成的工作，直接继续并给出最终结论，不要重复已执行过的步骤。')).toBe(true);
     expect([sha(initial), sha(fresh), sha(recovery)]).toEqual([
-      'a01a66a8040fcc0a12793c4449d53910a13e33a60d25d41e25cbb0663eedef4f',
-      '668fc24e0c6dcdd822cb1871d763edd3c8b1a34765bf1d9ac7ecdb14d3e12169',
-      'b774c60b29e24ca8f0e247c613cf6c45d76a5d00ae5640f79e60eff9913b5649',
+      'b01540d157ba507fd228df1d6e34106bb6a1d3684056f7e4b69d77729544dbae',
+      '0b7280f2ea02869baa389892879efc006725a3d8ea6ab2522555ed1858a73234',
+      '229691360bd2f6078a7ba3f7185e2d2dd912d973a525962bafe0a4300382ba09',
     ]);
   });
 
