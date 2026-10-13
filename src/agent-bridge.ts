@@ -319,7 +319,7 @@ export async function* queryAgent(
   onToolUse?: (toolName: string, toolInput?: unknown) => void,
   opts?: {
     resume?: string;
-    onSessionId?: (id: string) => void;
+    onSessionId?: (id: string, prompt: string) => void;
     groupInstructions?: string;
     onResumeFailed?: () => void;
     fallbackRetryPrompt?: string;
@@ -408,7 +408,7 @@ export async function* queryAgent(
           if (!reportedSessionId && opts?.onSessionId && ev.thread_id) {
             reportedSessionId = true;
             try {
-              opts.onSessionId(ev.thread_id);
+              opts.onSessionId(ev.thread_id, prompt);
             } catch (err) {
               console.error(`[codex-channel-octo] onSessionId callback threw: ${String(err)}`);
             }

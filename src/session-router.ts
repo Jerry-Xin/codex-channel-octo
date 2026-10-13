@@ -68,13 +68,13 @@ export class SessionRouter {
   private readonly mentionPreferences: MentionPreferences;
   private readonly conversationMarkdown: ConversationMarkdown;
 
-  constructor(config: Config, robotId: string, ownerUid = '') {
+  constructor(config: Config, robotId: string, ownerUid = '', documentStore?: import('./conversation-md.js').ConversationDocumentStore) {
     this.config = config;
     this.robotId = robotId;
     this.ownerUid = ownerUid;
     this.knownBotUids.add(robotId);
     this.mentionPreferences = new MentionPreferences(config);
-    this.conversationMarkdown = new ConversationMarkdown(config);
+    this.conversationMarkdown = new ConversationMarkdown(config, documentStore);
   }
 
   /** G14: register another known bot uid (future multi-bot support). */

@@ -28,6 +28,11 @@ export interface ConversationTurnContext {
   commit: (threadId: string) => void;
 }
 
+export interface ConversationDocumentStore {
+  getConversationDocumentSignature(sessionId: string, threadId: string): string | null | undefined;
+  setConversationDocumentSignature(sessionId: string, threadId: string, signature: string): void;
+}
+
 function target(channelId: string, channelType: ChannelType) {
   const parts = channelId.split(TOPIC_CHANNEL_SEPARATOR);
   if (!parts[0] || parts.length > 2 || (parts.length === 2 && !parts[1])) return undefined;
@@ -41,7 +46,8 @@ export class ConversationMarkdown {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly injected = new Map<string, { threadId: string; signature: string }>();
   private readonly warnings = new Map<string, number>();
-  constructor(private readonly config: Pick<Config, 'apiUrl' | 'botToken'>) {}
+  constructor(private readonly config: Pick<Config, 'apiUrl' | 'botToken'>,
+    private readonly persistence?: ConversationDocumentStore) {}
 
   async get(channelId: string, channelType: ChannelType): Promise<string | undefined> {
     const snapshot = await this.snapshot(channelId, channelType);
@@ -51,7 +57,11 @@ export class ConversationMarkdown {
   async prepareTurn(channelId: string, channelType: ChannelType, threadId?: string): Promise<ConversationTurnContext> {
     const snapshot = await this.snapshot(channelId, channelType);
     if (!snapshot) return { context: '', retryContext: '', commit: () => {} };
-    const previous = this.injected.get(channelId);
+    let previous = this.injected.get(channelId);
+    if (this.persistence && threadId) {
+      const signature = this.persistence.getConversationDocumentSignature(channelId, threadId);
+      previous = signature === null ? undefined : { threadId, signature: signature ?? 'unknown-legacy-injection' };
+    }
     if (snapshot.empty && (!threadId || previous?.threadId !== threadId)) {
       return { context: '', retryContext: '', commit: () => {} };
     }
@@ -59,6 +69,10 @@ export class ConversationMarkdown {
     return {
       context: unchanged ? '' : snapshot.context, retryContext: snapshot.empty ? '' : snapshot.context,
       commit: (threadId) => {
+        if (this.persistence) {
+          this.persistence.setConversationDocumentSignature(channelId, threadId, snapshot.signature);
+          return;
+        }
         this.injected.delete(channelId);
         this.injected.set(channelId, { threadId, signature: snapshot.signature });
         if (this.injected.size > MAX_CACHE_ENTRIES) this.injected.delete(this.injected.keys().next().value!);
@@ -96,7 +110,7 @@ export class ConversationMarkdown {
       if (this.cache.size > MAX_CACHE_ENTRIES) this.cache.delete(this.cache.keys().next().value!);
       const snapshot = await entry.value.catch(() => undefined);
       last = snapshot ?? last;
-      if (!entry.invalidated || entry.nextRefetchAt > Date.now()) return snapshot;
+      if (!entry.invalidated || entry.nextRefetchAt > Date.now()) return last;
     }
     return last;
   }
@@ -123,7 +137,7 @@ export class ConversationMarkdown {
         if (this.warnings.size > MAX_CACHE_ENTRIES) this.warnings.delete(this.warnings.keys().next().value!);
         const status = error instanceof Error ? /failed \((\d{3})\)/.exec(error.message)?.[1] : undefined;
         const key = JSON.stringify(resolved.key).replace(/[\u0085\u2028\u2029]/g, ' ');
-        console.warn(`[codex-channel-octo] Conversation markdown lookup failed for ${key} (${status ?? 'network or response error'}); continuing without server context.`);
+        console.warn(`[codex-channel-octo] Conversation markdown lookup failed for ${key} (${status ?? 'network or response error'}); server context may be stale or unavailable.`);
       }
       return undefined;
     }

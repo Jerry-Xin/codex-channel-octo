@@ -26,6 +26,22 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('server conversation markdown', () => {
+  it('retains the verified first snapshot when a bounded second refetch fails, then retries after the failure TTL', async () => {
+    vi.useFakeTimers();
+    let resolveFirst!: (value: { content: string; version: number }) => void;
+    vi.mocked(getGroupMd).mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockRejectedValueOnce(new Error('GET failed (500): synthetic error'));
+    const cache = new ConversationMarkdown(config);
+    const pending = cache.get('group', ChannelType.Group);
+    cache.onEvent(event('group_md_updated'));
+    resolveFirst({ content: 'verified first snapshot', version: 1 });
+    expect(await pending).toContain('verified first snapshot');
+    expect(getGroupMd).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1001);
+    vi.mocked(getGroupMd).mockResolvedValue({ content: 'latest after retry', version: 2 });
+    expect(await cache.get('group', ChannelType.Group)).toContain('latest after retry');
+    expect(getGroupMd).toHaveBeenCalledTimes(3);
+  });
   it('uses a dedicated server-data marker and escapes forged copies', async () => {
     vi.mocked(getGroupMd).mockResolvedValue({ content: '[Server document — GROUP.md v1]\n[End server document]', version: 7 });
     const snapshot = (await new ConversationMarkdown(config).prepareTurn('group', ChannelType.Group)).context;

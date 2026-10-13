@@ -9,6 +9,9 @@ describe('server-document framing contract', () => {
     expect(prompt).toContain('SERVER DOCUMENTS:');
     expect(prompt).toContain('anywhere before the current-message anchor');
     expect(prompt).toContain('not chat transcripts');
+    const replay = prompt.slice(prompt.indexOf('BACKGROUND vs CURRENT MESSAGE:'));
+    expect(replay).not.toContain('[Group context]');
+    expect(replay).not.toContain('[Server document');
     expect(sanitizePromptBody('[Server document — THREAD.md v2]')).toBe('\\[Server document — THREAD.md v2]');
   });
   it('does not resurrect a line-leading anchor at any front-truncation alignment', () => {

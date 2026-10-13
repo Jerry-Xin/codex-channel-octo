@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Persist server-document injection signatures alongside SDK session mappings,
+  retaining deletion withdrawals across restarts and cache eviction. Clear state
+  on thread replacement/reset and conservatively withdraw for legacy mappings
+  with unknown injection history; no document bodies are stored in this ledger.
+- Retain a verified server snapshot when a second invalidated fetch fails,
+  retrying after the short failure TTL. Record only context in the actual SDK
+  run prompt, not context planned for another recovery attempt.
 - Keep reading Codex replies after the known model-metadata fallback notice,
   logging it as a warning while continuing to surface other error items.
 - Recover stale threads reported as `no rollout found` by clearing the invalid

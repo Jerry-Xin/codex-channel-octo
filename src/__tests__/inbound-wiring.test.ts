@@ -26,6 +26,7 @@ vi.mock('../agent-bridge.js', () => ({ queryAgent: vi.fn(), isStreamInterruptErr
 
 import { startBot, type BotStack } from '../index.js';
 import { GroupContext } from '../group-context.js';
+import { SessionStore } from '../session-store.js';
 import { queryAgent } from '../agent-bridge.js';
 import { getMentionPreference, sendMessage, getGroupMd, getThreadMd } from '../octo/api.js';
 import { WKSocket } from '../octo/socket.js';
@@ -175,10 +176,39 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     else expect(refreshed).toContain(topic ? 'new thread' : 'new group');
   });
 
+  it('does not record an old withdrawal against a fresh recovery prompt', async () => {
+    const record = vi.spyOn(SessionStore.prototype, 'setConversationDocumentSignature');
+    const route = vi.spyOn(stack!.router, 'routeAndHandle');
+    spies.push(record, route);
+    vi.mocked(queryAgent).mockImplementation(async function* (text, _config, _context, _toolUse, options) {
+      options?.onSessionId?.('old-thread', text);
+      yield 'reply';
+    });
+    const inbound = message({ payload: { type: MessageType.Text, content: 'answer me', mention: { uids: ['test_bot'] } } });
+    emit(inbound);
+    await route.mock.results[0].value;
+    expect(record).toHaveBeenCalledOnce();
+    record.mockClear();
+    emit(message({ payload: { type: MessageType.Text, event: { type: 'thread_md_deleted' } } }));
+    await route.mock.results[1].value;
+    vi.mocked(getThreadMd).mockResolvedValue({ content: '', version: 0 });
+    vi.mocked(queryAgent).mockImplementation(async function* (text, _config, _context, _toolUse, options) {
+      expect(text).toContain('Document is absent');
+      expect(options?.fallbackRetryPrompt).not.toContain('Document is absent');
+      options?.onResumeFailed?.();
+      options?.onSessionId?.('fresh-thread', options.fallbackRetryPrompt!);
+      yield 'reply';
+    });
+    emit({ ...inbound, message_id: 'second', message_seq: 2 });
+    await route.mock.results[2].value;
+    expect(record).not.toHaveBeenCalled();
+    expect((await stack!.router.prepareConversationMd('group____topic', ChannelType.CommunityTopic, 'fresh-thread')).context).toBe('');
+  });
+
   it('includes updated server context on resumed turns and retries, while keeping local instructions separate', async () => {
     writeFileSync(join(root, 'instructions', 'group____topic.md'), 'operator-only instructions', { mode: 0o600 });
     vi.mocked(queryAgent).mockImplementation(async function* (_text, _config, _context, _toolUse, options) {
-      options?.onSessionId?.('test-session');
+      options?.onSessionId?.('test-session', _text);
       yield 'reply';
     });
     const route = vi.spyOn(stack!.router, 'routeAndHandle');

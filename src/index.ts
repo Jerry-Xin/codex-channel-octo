@@ -233,7 +233,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     }
 
     // --- Session router ---
-    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
+    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid, store);
 
     // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
     const activeHandlers = new Set<Promise<void>>();
@@ -720,12 +720,12 @@ export async function handleMessage(
       // queryAgent recovers by calling onResumeFailed (clear the bad id) and
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; onResumeFailed?: () => void; fallbackRetryPrompt?: string } | undefined = {
+      let sessionOpts: Parameters<typeof queryAgent>[4] = {
         ...(resume ? { resume } : {}),
-        onSessionId: (id: string) => {
+        onSessionId: (id: string, prompt: string) => {
           store.setSdkSessionId(sessionKey, id);
-          if (serverMd && ((serverMd.context && userContentForLLM.includes(serverMd.context))
-            || (serverMd.retryContext && fallbackRetryPrompt?.includes(serverMd.retryContext)))) {
+          if (serverMd && ((serverMd.context && prompt.includes(serverMd.context))
+            || (serverMd.retryContext && prompt.includes(serverMd.retryContext)))) {
             serverMd.commit(id);
           }
         },
