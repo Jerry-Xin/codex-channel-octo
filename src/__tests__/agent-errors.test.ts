@@ -12,7 +12,8 @@ describe('agent error redaction', () => {
     expect(summarizeAgentError(error)).toBe('Error: agent operation failed (details withheld)');
   });
   it('reports a known bootstrap failure with safe recovery instructions', () => {
-    expect(summarizeAgentError(new Error('CODEX_JSONL_PROXY_BOOTSTRAP_FAILURE'))).toContain('reinstall dependencies');
+    expect(summarizeAgentError(new Error('CODEX_JSONL_PROXY_BOOTSTRAP_FAILURE: synthetic'))).toContain('reinstall dependencies');
+    expect(summarizeAgentError(new Error('Codex Exec exited with code 1: CODEX_JSONL_PROXY_BOOTSTRAP_FAILURE: synthetic'))).toBe('Codex process exited with code 1');
   });
   it('recognizes actual SDK parse errors without echoing their payload or cause', () => {
     const error = new Error('Failed to parse item: SYNTHETIC_PRIVATE_PAYLOAD', {

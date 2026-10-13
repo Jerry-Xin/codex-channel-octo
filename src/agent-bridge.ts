@@ -371,6 +371,7 @@ export async function* queryAgent(
   // would misfire on ordinary errors from the `codex exec resume` path (rate
   // limits, CLI usage echoes, subprocess stderr) and wrongly drop a valid thread.
   const isResumeError = (err: unknown): boolean => {
+    if (isSdkJsonlParseError(err)) return false;
     const m = err instanceof Error ? err.message : String(err);
     return /thread.*not.*found|no (conversation|session|thread|rollout) found|invalid.*(thread|session)|session.*not.*found|--resume requires a valid/i.test(m);
   };
@@ -531,7 +532,12 @@ export async function* queryAgent(
         const continuationPrompt = `${SECURITY_PROMPT_PREFIX}\n\n---\n\n上次回复因连接中断未完成。请基于你已经完成的工作，直接继续并给出最终结论，不要重复已执行过的步骤。`;
         // Recovery run is OUTSIDE the try above: a second interrupt propagates
         // rather than triggering another recovery (bounded to one).
-        yield* runOnce(cap.threadId, continuationPrompt, se, { threadId: cap.threadId });
+        try {
+          yield* runOnce(cap.threadId, continuationPrompt, se, { threadId: cap.threadId });
+        } catch (recoveryError) {
+          if (isSdkJsonlParseError(recoveryError)) se.seen = true;
+          throw recoveryError;
+        }
         return;
       }
       throw err;

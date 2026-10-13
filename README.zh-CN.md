@@ -104,6 +104,8 @@ macOS/Linux 使用可执行代理，在 SDK 的 `readline` 读取之前将 CLI s
 
 启动链增加两个 Node 进程；子进程未结束时仍转发可捕获信号，信号退出前刷新代理 stdout。SIGKILL 无法捕获，孤儿清理仍依赖外部监管。官方 CLI shim 保留自身环境设置，但 SDK 的 bundled PATH 注入被绕过；CLI 内部搜索会自行定位 rg，直接 shell 调用 rg 可能需要系统安装。
 
+SDK override 使用私有可执行 shell 启动器，通过 `exec` 调用当前 Node 的绝对路径，不依赖 PATH 中存在 node；按代理路径缓存，正常进程退出时清理。显式取消后停止转发并独立排空子进程管道，不等待下游消费；1.5 秒后升级 SIGKILL，再设 0.5 秒退出上限。子进程自然信号退出仍刷新排队输出，但消费者已停止的取消路径允许丢弃输出。转换以有效 UTF-8 JSONL 为前提，不保证任意二进制透明传输。relay/router 同样使用脱敏摘要；包括恢复运行在内，SDK 解析错误不能成为失效线程的控制信号。代理恢复可用后再次丢失会重新告警。
+
 ### Docker 专用配置
 
 在专用 Docker 容器中，可使用 [`config.bot.docker.example.json`](./config.bot.docker.example.json) 作为该 bot 的配置，默认选择 `danger-full-access`。已有配置只需在 `sdk` 内设置：

@@ -109,6 +109,8 @@ If the proxy is missing, non-regular or not executable, the adapter warns once w
 
 The launcher chain adds two Node processes. Graceful signals are forwarded while the child remains alive and pending proxy stdout is flushed before signal exit; SIGKILL cannot be handled and external supervision is still needed for orphan cleanup. The official CLI shim preserves its environment setup, but the SDK's own bundled PATH injection is bypassed: native CLI search self-locates ripgrep, while direct shell `rg` may require a system installation.
 
+The SDK override selects a private executable shell launcher which uses `exec` with the running absolute Node interpreter, not PATH lookup for `node`. Launchers are cached per proxy path and removed on normal process exit. Explicit cancellation stops forwarding output, drains child pipes independently of the downstream reader, and escalates an unresponsive child to SIGKILL after 1.5 seconds; shutdown has a further 0.5-second bound. Natural child signal exit still flushes queued output, whereas cancellation may discard output because the consumer has stopped. The transform assumes valid UTF-8 JSONL, not arbitrary binary stdout. Relay/router error logs use the same payload-denying summarizer; SDK parse errors can never classify as stale-thread signals, including during recovery.
+
 ### Dedicated Docker configuration
 
 Use [`config.bot.docker.example.json`](./config.bot.docker.example.json) for a dedicated Docker container. That template defaults to `danger-full-access`. For an existing bot, set this field inside `sdk`:

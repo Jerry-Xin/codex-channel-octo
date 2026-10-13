@@ -15,7 +15,7 @@ export function summarizeAgentError(error: unknown): string {
     return `Codex SDK JSONL parse failure (${category})`;
   }
   if (error instanceof Error) {
-    if (error.message.includes('CODEX_JSONL_PROXY_BOOTSTRAP_FAILURE')) {
+    if (error.message.startsWith('CODEX_JSONL_PROXY_BOOTSTRAP_FAILURE:')) {
       return 'Codex JSONL proxy bootstrap failed; reinstall dependencies and run npm run build';
     }
     const exit = /^Codex Exec exited with (signal SIG[A-Z]+|code \d+):/.exec(error.message);

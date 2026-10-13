@@ -81,6 +81,19 @@ describe('SDK JSONL failure recovery', () => {
     expect(calls).toHaveLength(2);
     expect(summarizeAgentError(error)).toBe('Codex SDK JSONL parse failure (incomplete-json)');
   });
+  it('never classifies a recovery-run rejected payload as a stale thread', async () => {
+    const rejected = new Error('Failed to parse item: {"aggregated_output":"thread not found SYNTHETIC_PRIVATE_OUTPUT"}', {
+      cause: new SyntaxError('Unterminated string'),
+    });
+    scriptedRuns = [async function* () { throw new Error('stream closed before response.completed'); },
+      async function* () { throw rejected; },
+      async function* () { yield msg('replay', 'REPLAYED'); }];
+    const reset = vi.fn();
+    await expect(collect(queryAgent('request', cfg(), undefined, undefined, { resume: 'existing', onResumeFailed: reset })))
+      .rejects.toBe(rejected);
+    expect(calls.map((call) => call.kind)).toEqual(['resume', 'resume']);
+    expect(reset).not.toHaveBeenCalled();
+  });
   it('does not retry an untracked thread', async () => {
     scriptedRuns = [async function* () { throw failure(); }];
     await expect(collect(queryAgent('request', cfg()))).rejects.toThrow('Failed to parse item:');
