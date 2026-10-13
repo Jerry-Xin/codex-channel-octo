@@ -11,7 +11,7 @@ export function buildSenderContext(message: BotMessage, ownerUid: string): SafeT
     channel_type: message.channel_type !== undefined && [ChannelType.DM, ChannelType.Group, ChannelType.CommunityTopic].includes(message.channel_type)
       ? message.channel_type : null,
     is_owner: isRegistrationOwner(senderUid, ownerUid,
-      transportSpaceId(message.channel_id) || transportSpaceId(senderUid)),
+      transportSpaceId(message.channel_id) || transportSpaceId(senderUid, ownerUid)),
   };
   return safeSenderMetadata(metadata);
 }

@@ -5,10 +5,15 @@ export function normalizeOwnerUid(uid: unknown): string | null {
   return uid;
 }
 
-/** Parse the adapter's s{spaceId}_{opaqueId} transport shape without guessing its alphabet. */
-export function transportSpaceId(value: unknown): string {
+/** Parse parent channels; a known opaque UID fixes the sender prefix boundary without splitting its underscores. */
+export function transportSpaceId(value: unknown, knownUid?: unknown): string {
   if (typeof value !== 'string') return '';
-  const first = value.split('@')[0];
+  if (knownUid !== undefined) {
+    const uid = normalizeOwnerUid(knownUid);
+    if (!uid || !value.startsWith('s') || !value.endsWith(`_${uid}`)) return '';
+    return value.slice(1, -uid.length - 1);
+  }
+  const first = value.split('@')[0].split('____')[0];
   const separator = first.lastIndexOf('_');
   return first.startsWith('s') && separator > 1 ? first.slice(1, separator) : '';
 }

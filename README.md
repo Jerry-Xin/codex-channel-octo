@@ -29,6 +29,8 @@ Ownership accepts a validated registration UID verbatim or `s<spaceId>_<owner_ui
 
 **Headline feature — IM ↔ terminal Codex interop (opt-in):** each bot conversation maps to a Codex thread. With sharing enabled, you can resume a bot's group conversation from your own terminal via `codex exec resume <threadId>`, and vice versa.
 
+Space attribution parses topic channels through their parent group, before the `____` suffix. Sender-side fallback derives the prefix from the complete known registration UID, including underscores. It consumes transport metadata, never a user-authored claimed UID; channel space remains preferred. Prompt marker separators use one positive character class with a line-break guard, avoiding overlapping BOM alternatives and exponential backtracking on ordinary text.
+
 ## Install
 
 ```bash

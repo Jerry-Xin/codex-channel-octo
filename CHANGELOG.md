@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Remove overlapping separator alternatives that let BOM-prefixed ordinary
+  text cause exponential prompt-escaping backtracking; derive topic ownership
+  from the parent channel and sender prefix boundaries from the complete owner UID.
 - Keep reading Codex replies after the known model-metadata fallback notice,
   logging it as a warning while continuing to surface other error items.
 - Recover stale threads reported as `no rollout found` by clearing the invalid

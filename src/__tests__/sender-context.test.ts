@@ -91,6 +91,16 @@ describe('trusted current sender context', () => {
   it('does not accept a sender prefix belonging to a different channel space', () => {
     expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceB_alice', channel_id: 'sSpaceA_group', channel_type: ChannelType.Group }), 'alice')).is_owner).toBe(false);
   });
+  it.each(['SpaceA', 'abcdef0123456789abcdef0123456789', 'minglue_default'])('recognizes the owner in %s topic channels without accepting a different space', (space) => {
+    const owner = '0123456789abcdef0123456789abcdef';
+    const inbound = message({ from_uid: `s${space}_${owner}`, channel_id: `s${space}_group____topic`, channel_type: ChannelType.CommunityTopic });
+    expect(metadata(buildSenderContext(inbound, owner)).is_owner).toBe(true);
+    expect(metadata(buildSenderContext({ ...inbound, channel_id: 'sOther_group____topic' }, owner)).is_owner).toBe(false);
+  });
+  it('derives the sender prefix from the complete registration UID including underscores', () => {
+    expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_s1_owner' }), 's1_owner')).is_owner).toBe(true);
+    expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_s1_owner', channel_id: 'sOther_group____topic' }), 's1_owner')).is_owner).toBe(false);
+  });
 
   it.each(['user+tag@corp', '张三'])('preserves non-ASCII and email-tag owner UIDs %s', (from_uid) => {
     expect(metadata(buildSenderContext(message({ from_uid }), from_uid))).toMatchObject({ from_uid, is_owner: true });
