@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Drop the first partial line of front-truncated escaped history, preventing a
+  sliced-off escape from introducing a second privileged current-message anchor.
 - Persist server-document injection signatures alongside SDK session mappings,
   retaining deletion withdrawals across restarts and cache eviction. Clear state
   on thread replacement/reset and conservatively withdraw for legacy mappings

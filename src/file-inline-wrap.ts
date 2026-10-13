@@ -195,6 +195,8 @@ export const MAX_USER_LLM_BYTES = 98_304; // 96 KB
  * oldest) — never the end. If the body alone meets/exceeds the budget, context is
  * dropped entirely and the body is byte-capped as a last resort. This prevents a
  * large prior-history block from evicting the current message (PR #120 review).
+ * Context must already be escaped by the caller. Front truncation discards its
+ * first partial line so a slice cannot strip a marker's protective backslash.
  */
 /**
  * Byte-cap the body alone as a last resort, appending a truncation notice when it
@@ -247,7 +249,9 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   const ctxBuf = Buffer.from(context, 'utf-8');
   const tail = ctxBuf.subarray(ctxBuf.length - tailBudget);
   const decoded = new TextDecoder('utf-8').decode(tail).replace(/^�+/, '');
-  return marker + decoded + anchored;
+  const firstLineEnd = decoded.indexOf('\n');
+  const completeLines = firstLineEnd < 0 ? '' : decoded.slice(firstLineEnd + 1);
+  return marker + completeLines + anchored;
 }
 
 /** Exported for tests. */
