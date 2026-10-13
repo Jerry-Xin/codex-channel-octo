@@ -29,7 +29,7 @@ import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
 import { buildSenderContext } from './sender-context.js';
-import type { SafeText } from './prompt-safety.js';
+import { isConversationMdEvent } from './conversation-md.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
@@ -234,7 +234,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     }
 
     // --- Session router ---
-    const router = new SessionRouter(config, gateway.botId, () => gateway.ownerUid);
+    const router = new SessionRouter(config, gateway.botId, () => gateway.ownerUid, store);
 
     // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
     const activeHandlers = new Set<Promise<void>>();
@@ -247,7 +247,8 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
       if (gateway.draining) return;
       // Match the gateway's self-echo guard: server preference notifications
       // authored as this bot must reach the router to invalidate its cache.
-      if (msg.from_uid === gateway.botId && msg.payload.event?.type !== 'mention_pref_updated') return;
+      if (msg.from_uid === gateway.botId && msg.payload.event?.type !== 'mention_pref_updated'
+        && !isConversationMdEvent(msg.payload.event?.type)) return;
       const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
         .catch((err) => {
           console.error(`[codex-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
@@ -653,11 +654,13 @@ export async function handleMessage(
       // only when there is no history. Later turns carry only the delta. The
       // cursor was already advanced above, so dropping the delta here does not
       // strand messages — history covers them and they must not be re-shown.
+      const serverMd = isGroup ? await router.prepareConversationMd(channelId, channelType, resume) : undefined;
       const injectedContext = firstTurnHistory ? firstTurnHistory : groupContextBlock;
       const userContentForLLM = assembleUserMessage(
         injectedContext,
         userBody,
         MAX_USER_LLM_BYTES,
+        serverMd?.context,
       );
 
       // Pre-assemble the stale-resume RETRY prompt here, where `historyBlock` and
@@ -673,7 +676,7 @@ export async function handleMessage(
       // Only built when resuming — it's the sole consumer (sessionOpts below), so a
       // first turn (no resume) would otherwise assemble it just to discard it.
       const fallbackRetryPrompt = resume
-        ? assembleUserMessage(historyBlock, userBody, MAX_USER_LLM_BYTES)
+        ? assembleUserMessage(historyBlock, userBody, MAX_USER_LLM_BYTES, serverMd?.retryContext)
         : undefined;
 
       // --- Query agent with structural role separation (Q3 fix) ---
@@ -718,10 +721,16 @@ export async function handleMessage(
       // queryAgent recovers by calling onResumeFailed (clear the bad id) and
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; onResumeFailed?: () => void; fallbackRetryPrompt?: string; senderContext?: SafeText } | undefined = {
+      let sessionOpts: Parameters<typeof queryAgent>[4] = {
         senderContext: buildSenderContext(msg, router.getOwnerUid()),
         ...(resume ? { resume } : {}),
-        onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
+        onSessionId: (id: string, prompt: string) => {
+          store.setSdkSessionId(sessionKey, id);
+          if (serverMd && ((serverMd.context && prompt.includes(serverMd.context))
+            || (serverMd.retryContext && prompt.includes(serverMd.retryContext)))) {
+            serverMd.commit(id);
+          }
+        },
         ...(resume
           ? {
               onResumeFailed: () => store.clearSdkSessionId(sessionKey),

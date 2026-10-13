@@ -71,6 +71,7 @@ const SECTION_NAMES = [
   `Quoted message from${SECTION_SUFFIX}`, 'answered history', 'new messages',
   'Recent group messages', 'Group instructions',
   '… earlier context truncated', '… user input truncated to cap',
+  `Server document${SECTION_SUFFIX}`, 'End server document', '… markdown truncated',
 ];
 const SECTION_MARKER_RE = new RegExp(
   `^(${MARKER_SEPARATOR}*)\\[(${MARKER_SEPARATOR}*(?:${SECTION_NAMES.map((name) => name.replace(/ /g, `${MARKER_SEPARATOR}+`)).join('|')}))\\]`, 'gim',
