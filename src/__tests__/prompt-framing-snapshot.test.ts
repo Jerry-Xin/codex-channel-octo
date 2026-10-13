@@ -2,7 +2,7 @@
  * T26 — prompt framing snapshot. The strings passed to `runStreamed` for the
  * initial, stream-recovery and stale-resume fresh-retry attempts must stay
  * byte-identical to the pre-output-selection bridge. The digests below were
- * recorded from the baseline bridge (upstream main f17e59e) with this same
+ * recorded from the baseline bridge (upstream main dd12980, after server-document framing) with this same
  * script; any edit to the framing changes them.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -89,9 +89,9 @@ describe('T26: prompt framing is byte-identical to baseline', () => {
     expect(fresh.endsWith('\n\n---\n\nFALLBACK BODY')).toBe(true);
     expect(recovery.endsWith('\n\n---\n\n上次回复因连接中断未完成。请基于你已经完成的工作，直接继续并给出最终结论，不要重复已执行过的步骤。')).toBe(true);
     expect([sha(initial), sha(fresh), sha(recovery)]).toEqual([
-      '1bb3e4a70ae025c80cbaa09126d38bab31729aed8c1cb29e860d2e17ba363380',
-      '34b5452bb4330dfb2426a01debc6d890a1fdd1aab938b4f69311c8872036174f',
-      '3b70b3920e18923e9531e355895c836dd594101779c9838904eb009db99a9dca',
+      'a01a66a8040fcc0a12793c4449d53910a13e33a60d25d41e25cbb0663eedef4f',
+      '668fc24e0c6dcdd822cb1871d763edd3c8b1a34765bf1d9ac7ecdb14d3e12169',
+      'b774c60b29e24ca8f0e247c613cf6c45d76a5d00ae5640f79e60eff9913b5649',
     ]);
   });
 

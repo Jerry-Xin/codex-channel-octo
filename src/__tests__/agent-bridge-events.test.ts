@@ -311,7 +311,7 @@ describe('T25: one canonical options contract', () => {
   it('preserves every existing option field', () => {
     expectTypeOf<QueryAgentOptions>().toEqualTypeOf<{
       resume?: string;
-      onSessionId?: (id: string) => void;
+      onSessionId?: (id: string, prompt: string) => void;
       groupInstructions?: string;
       onResumeFailed?: () => void;
       fallbackRetryPrompt?: string;
@@ -330,15 +330,20 @@ describe('T25: one canonical options contract', () => {
       },
     ];
     const ids: string[] = [];
+    const reportedPrompts: string[] = [];
     let cleared = 0;
     const out: string[] = [];
     for await (const t of queryAgent('hi', cfg(), undefined, undefined, {
       resume: 'old',
-      onSessionId: (id) => ids.push(id),
+      fallbackRetryPrompt: 'fresh document context',
+      onSessionId: (id, prompt) => { ids.push(id); reportedPrompts.push(prompt); },
       onResumeFailed: () => cleared++,
     })) out.push(t);
     expect(out).toEqual(['ok']);
     expect(ids).toEqual(['t-new']);
+    expect(reportedPrompts).toHaveLength(1);
+    expect(reportedPrompts[0]).toContain('fresh document context');
+    expect(reportedPrompts[0]).not.toContain('\n\nhi');
     expect(cleared).toBe(1);
   });
 });
