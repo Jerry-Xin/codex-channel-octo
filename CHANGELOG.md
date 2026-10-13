@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep Octo recovery alive after failed token refreshes and cooldown-suppressed
+  requests, independently of successful REST heartbeats. Coalesce retry timers,
+  ignore retired-socket callbacks and cancel/abort recovery on shutdown.
+- Bound WebSocket/CONNACK handshakes and retain backoff reconnect after rapid
+  disconnect hints, so transient failures recover without restarting the gateway.
 - Preserve pre-feature DM session keys, persisted SDK mappings, workspace and
   memory paths; sender attribution no longer changes DM routing parsers.
 - Escape Unicode format/nonspacing marks and blank fillers at structural marker
