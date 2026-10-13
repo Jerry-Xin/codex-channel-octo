@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep Octo recovery alive after failed token refreshes and cooldown-suppressed
+  requests, independently of successful REST heartbeats. Coalesce retry timers,
+  ignore retired-socket callbacks and cancel/abort recovery on shutdown.
+- Bound WebSocket/CONNACK handshakes and retain backoff reconnect after rapid
+  disconnect hints, so transient failures recover without restarting the gateway.
+
 - Drop the first partial line of front-truncated escaped history, preventing a
   sliced-off escape from introducing a second privileged current-message anchor.
 - Persist server-document injection signatures alongside SDK session mappings,
