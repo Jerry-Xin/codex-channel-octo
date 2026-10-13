@@ -128,6 +128,15 @@ describe('trusted current sender context', () => {
     });
   });
 
+  it.each(['sA_own____id@sB_bot', 'sB_bot@sA_own____id', 'sA_own____x@sB_bot', 'sB_bot@sA_own____x'])('rejects cross-space compound endpoints even under a topic type: %s', (channel_id) => {
+    const owner = channel_id.includes('id') ? 'own____id' : 'own';
+    expect(metadata(buildSenderContext(message({ from_uid: `sA_${owner}`, channel_id,
+      channel_type: ChannelType.CommunityTopic }), owner)).is_owner).toBe(false);
+  });
+  it('rejects an empty channel endpoint identifier', () => {
+    expect(metadata(buildSenderContext(message({ from_uid: 'sA_owner', channel_id: 'sA_' }), 'owner')).is_owner).toBe(false);
+  });
+
   it.each([undefined, '', 'group', 'group____topic'])('does not infer prefixed ownership without a verifiable channel %s', (channel_id) => {
     expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_evil_owner', channel_id }), 'owner')).is_owner).toBe(false);
     expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_owner', channel_id }), 'owner')).is_owner).toBe(false);

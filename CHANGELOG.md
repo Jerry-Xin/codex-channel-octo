@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve pre-feature DM session keys, persisted SDK mappings, workspace and
+  memory paths; sender attribution no longer changes DM routing parsers.
+- Escape Unicode format/nonspacing marks and blank fillers at structural marker
+  boundaries, including supplementary-plane characters, without ambiguous
+  separator alternatives. Match complete unescaped request anchors only.
+- Validate all endpoints before topic extraction and reject empty endpoint IDs.
+
 - Treat compound-DM endpoint UIDs as opaque, applying topic parent extraction
   only to topic channels so literal `____` cannot hide a cross-space endpoint.
 

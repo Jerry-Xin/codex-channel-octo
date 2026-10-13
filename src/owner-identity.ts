@@ -1,5 +1,3 @@
-import { parentGroupNo } from './channel-id.js';
-
 /** Validate an opaque UID without case folding, prefix stripping or Unicode equivalence. */
 export function normalizeOwnerUid(uid: unknown): string | null {
   if (typeof uid !== 'string' || uid.length === 0 || uid.length > 256
@@ -7,17 +5,12 @@ export function normalizeOwnerUid(uid: unknown): string | null {
   return uid;
 }
 
-/** Parse parent channels; a known opaque UID fixes the sender prefix boundary without splitting its underscores. */
-export function transportSpaceId(value: unknown, knownUid?: unknown): string {
+/** Derive a candidate sender prefix using the full known UID; never use it for routing. */
+export function transportSpaceId(value: unknown, knownUid: unknown): string {
   if (typeof value !== 'string') return '';
-  if (knownUid !== undefined) {
-    const uid = normalizeOwnerUid(knownUid);
-    if (!uid || !value.startsWith('s') || !value.endsWith(`_${uid}`)) return '';
-    return value.slice(1, -uid.length - 1);
-  }
-  const first = parentGroupNo(value.split('@')[0]);
-  const separator = first.lastIndexOf('_');
-  return first.startsWith('s') && separator > 1 ? first.slice(1, separator) : '';
+  const uid = normalizeOwnerUid(knownUid);
+  if (!uid || !value.startsWith('s') || !value.endsWith(`_${uid}`)) return '';
+  return value.slice(1, -uid.length - 1);
 }
 
 /** Accept the registration UID itself or its single prefix in this transport's space only. */

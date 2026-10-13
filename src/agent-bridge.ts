@@ -371,7 +371,7 @@ export async function* queryAgent(
   const senderContext = opts?.senderContext ?? safeSenderMetadata({ from_uid: null, channel_id: null, channel_type: null, is_owner: false });
   /** Identity precedes all background/request text on every initial or recovery run. */
   const frameTurn = (message: string): string => {
-    const anchored = message.includes(CURRENT_MESSAGE_ANCHOR) ? message : `${CURRENT_MESSAGE_ANCHOR}\n${message}`;
+    const anchored = message.split(/\r\n|[\r\n\u2028\u2029]/).some((line) => line === CURRENT_MESSAGE_ANCHOR) ? message : `${CURRENT_MESSAGE_ANCHOR}\n${message}`;
     return `${SECURITY_PROMPT_PREFIX}\n\n${senderContext}\n---\n\n${anchored}`;
   };
   const promptText = frameTurn(userMessage);

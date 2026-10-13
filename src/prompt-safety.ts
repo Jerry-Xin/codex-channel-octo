@@ -63,7 +63,7 @@ export const MAX_DISPLAY_NAME_LEN = 128;
  * history[^\]]*` is included so the first-turn/fallback history header
  * (index.ts) is covered too \u2014 making the "cannot drift into a gap" claim hold.
  */
-const MARKER_SEPARATOR = '(?:(?![\\r\\n\\u2028\\u2029])[\\s\\u00ad\\u180e\\u200b-\\u200f\\u2060])';
+const MARKER_SEPARATOR = '(?:(?![\\r\\n\\u2028\\u2029])[\\s\\p{Cf}\\p{Mn}\\u115f\\u1160\\u2800\\u3164\\uffa0])';
 const SECTION_SUFFIX = '[^\\]\\[\\r\\n\\u2028\\u2029]*';
 const SECTION_NAMES = [
   'Group context', 'Conversation history', `Prior conversation history${SECTION_SUFFIX}`,
@@ -71,10 +71,11 @@ const SECTION_NAMES = [
   `Quoted message from${SECTION_SUFFIX}`, 'answered history', 'new messages',
   'Recent group messages', 'Group instructions',
   '… earlier context truncated', '… user input truncated to cap',
+  'older messages dropped', 'older turns dropped',
   `Server document${SECTION_SUFFIX}`, 'End server document', '… markdown truncated',
 ];
 const SECTION_MARKER_RE = new RegExp(
-  `^(${MARKER_SEPARATOR}*)\\[(${MARKER_SEPARATOR}*(?:${SECTION_NAMES.map((name) => name.replace(/ /g, `${MARKER_SEPARATOR}+`)).join('|')}))\\]`, 'gim',
+  `^(${MARKER_SEPARATOR}*)\\[(${MARKER_SEPARATOR}*(?:${SECTION_NAMES.map((name) => name.replace(/ /g, `${MARKER_SEPARATOR}+`)).join('|')}))\\]`, 'gimu',
 );
 
 /**
@@ -102,7 +103,7 @@ export const CURRENT_SENDER_ANCHOR = '[Current sender metadata — adapter-provi
  * model may still treat as a new line.
  */
 const ROLE_LABEL_RE = new RegExp(
-  `^(${MARKER_SEPARATOR}*)(\\[${MARKER_SEPARATOR}*(?:user|assistant)(?!\\w)[^\\]\\r\\n\\u2028\\u2029]*\\]:)`, 'gim',
+  `^(${MARKER_SEPARATOR}*)(\\[${MARKER_SEPARATOR}*(?:user|assistant)(?!\\w)[^\\]\\r\\n\\u2028\\u2029]*\\]:)`, 'gimu',
 );
 
 /** Bracket delimiters + all line/para separators that could forge a boundary. */
