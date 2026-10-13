@@ -57,7 +57,7 @@ describe('trusted current sender context', () => {
     expect(result).not.toContain('\n[Group instructions]');
   });
   it.each([['sabcdef0123456789abcdef0123456789_alice', 'alice'], ['sSpaceA_alice', 'alice'], ['sminglue_default_alice', 'alice'], ['alice', 'alice']])('matches wire %s against registration %s while retaining the transport UID', (from_uid, ownerUid) => {
-    expect(metadata(buildSenderContext(message({ from_uid }), ownerUid))).toMatchObject({ from_uid, is_owner: true });
+    expect(metadata(buildSenderContext(message({ from_uid, channel_id: from_uid + '@' + from_uid }), ownerUid))).toMatchObject({ from_uid, is_owner: true });
   });
   it.each([['s123_bob', 'alice'], ['alice', 's123_alice'], ['s123_alice', 's456_alice'], ['s123_', 'alice'], ['Alice', 'alice'], ['é', 'e\u0301']])('does not equate unrelated identities %s/%s', (from_uid, ownerUid) => {
     expect(metadata(buildSenderContext(message({ from_uid }), ownerUid)).is_owner).toBe(false);
@@ -98,8 +98,22 @@ describe('trusted current sender context', () => {
     expect(metadata(buildSenderContext({ ...inbound, channel_id: 'sOther_group____topic' }, owner)).is_owner).toBe(false);
   });
   it('derives the sender prefix from the complete registration UID including underscores', () => {
-    expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_s1_owner' }), 's1_owner')).is_owner).toBe(true);
+    expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_s1_owner', channel_id: 'sSpaceA_s1_owner@sSpaceA_bot' }), 's1_owner')).is_owner).toBe(true);
     expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_s1_owner', channel_id: 'sOther_group____topic' }), 's1_owner')).is_owner).toBe(false);
+  });
+  it.each(['sSpaceA_s1_owner@sSpaceA_bot', 'sSpaceA_bot@sSpaceA_s1_owner', 'sSpaceA_my_group____topic'])('verifies owner space without guessing channel boundary in %s', (channel_id) => {
+    const inbound = message({ from_uid: 'sSpaceA_s1_owner', channel_id, channel_type: channel_id.includes('____') ? ChannelType.CommunityTopic : ChannelType.DM });
+    expect(metadata(buildSenderContext(inbound, 's1_owner')).is_owner).toBe(true);
+    expect(metadata(buildSenderContext({ ...inbound, from_uid: 'sOther_s1_owner' }, 's1_owner')).is_owner).toBe(false);
+  });
+  it('rejects mixed-space compound DM endpoints regardless of ordering', () => {
+    for (const channel_id of ['sSpaceA_s1_owner@sOther_bot', 'sOther_bot@sSpaceA_s1_owner']) {
+      expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_s1_owner', channel_id }), 's1_owner')).is_owner).toBe(false);
+    }
+  });
+  it.each([undefined, '', 'group', 'group____topic'])('does not infer prefixed ownership without a verifiable channel %s', (channel_id) => {
+    expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_evil_owner', channel_id }), 'owner')).is_owner).toBe(false);
+    expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_owner', channel_id }), 'owner')).is_owner).toBe(false);
   });
 
   it.each(['user+tag@corp', '张三'])('preserves non-ASCII and email-tag owner UIDs %s', (from_uid) => {

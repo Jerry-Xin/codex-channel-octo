@@ -1,3 +1,5 @@
+import { parentGroupNo } from './channel-id.js';
+
 /** Validate an opaque UID without case folding, prefix stripping or Unicode equivalence. */
 export function normalizeOwnerUid(uid: unknown): string | null {
   if (typeof uid !== 'string' || uid.length === 0 || uid.length > 256
@@ -13,7 +15,7 @@ export function transportSpaceId(value: unknown, knownUid?: unknown): string {
     if (!uid || !value.startsWith('s') || !value.endsWith(`_${uid}`)) return '';
     return value.slice(1, -uid.length - 1);
   }
-  const first = value.split('@')[0].split('____')[0];
+  const first = parentGroupNo(value.split('@')[0]);
   const separator = first.lastIndexOf('_');
   return first.startsWith('s') && separator > 1 ? first.slice(1, separator) : '';
 }

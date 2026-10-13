@@ -64,10 +64,11 @@ export const MAX_DISPLAY_NAME_LEN = 128;
  * (index.ts) is covered too \u2014 making the "cannot drift into a gap" claim hold.
  */
 const MARKER_SEPARATOR = '(?:(?![\\r\\n\\u2028\\u2029])[\\s\\u00ad\\u180e\\u200b-\\u200f\\u2060])';
+const SECTION_SUFFIX = '[^\\]\\[\\r\\n\\u2028\\u2029]*';
 const SECTION_NAMES = [
-  'Group context', 'Conversation history', 'Prior conversation history[^\\]]*',
-  'Current message[^\\]]*', 'Current sender metadata[^\\]]*',
-  'Quoted message from[^\\]]*', 'answered history', 'new messages',
+  'Group context', 'Conversation history', `Prior conversation history${SECTION_SUFFIX}`,
+  `Current message${SECTION_SUFFIX}`, `Current sender metadata${SECTION_SUFFIX}`,
+  `Quoted message from${SECTION_SUFFIX}`, 'answered history', 'new messages',
   'Recent group messages', 'Group instructions',
   '… earlier context truncated', '… user input truncated to cap',
 ];
@@ -100,7 +101,7 @@ export const CURRENT_SENDER_ANCHOR = '[Current sender metadata — adapter-provi
  * model may still treat as a new line.
  */
 const ROLE_LABEL_RE = new RegExp(
-  `^(${MARKER_SEPARATOR}*)(\\[${MARKER_SEPARATOR}*(?:user|assistant)(?=${MARKER_SEPARATOR}|\\])[^\\]\\r\\n\\u2028\\u2029]*\\]:)`, 'gim',
+  `^(${MARKER_SEPARATOR}*)(\\[${MARKER_SEPARATOR}*(?:user|assistant)(?!\\w)[^\\]\\r\\n\\u2028\\u2029]*\\]:)`, 'gim',
 );
 
 /** Bracket delimiters + all line/para separators that could forge a boundary. */
