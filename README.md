@@ -23,11 +23,22 @@
 
 A long-running process: register as an Octo bot → connect over WebSocket to receive messages → run a coding task with local Codex → post the reply back. Supports DM / group (@mention) / community topics, multi-turn conversations, multiple bots in one process, and config hot-reload.
 
+Each adapter-framed user turn includes bounded current sender metadata: transport `from_uid`, channel ID/type, and `is_owner` computed against the latest registration `owner_uid`. The same immutable metadata accompanies stream recovery and fresh retries; it is deliberately not stored in shared `AGENTS.md`. Display names, quotes, and claimed IDs are not authentication, and forged sender markers in message text/history are escaped. This metadata identifies the sender but does not grant tool permissions or override security rules; enforce privileged actions in the host, not solely in a prompt. Direct terminal resumes outside the adapter do not establish an authenticated IM sender.
+
+Sender metadata has these security properties:
+
+- Exact validated registration equality is accepted. Bare registration UIDs may also be matched to prefixed transport UIDs for informational compatibility; the complete owner UID determines the candidate prefix.
+- A supplied channel is required for inferred prefixed ownership. Every complete endpoint is checked before topic-parent extraction; literal `____` inside DM UIDs stays opaque. Empty identifiers fail closed. This is prefix compatibility, not proof of namespace equality: underscore-extended spaces can share a prefix. Authoritative full transport ownership or an explicit server space is required for host authorization.
+- Attribution does not change DM session keys, SQLite SDK mappings, workspace paths or memory paths; their pre-feature routing parser is retained. No registration IDs are stripped, and IDs/names are not case-folded or Unicode-normalized.
+- Metadata is bounded single-line JSON. Missing identity emits null fields and `is_owner:false`; identity precedes background and the request on initial, retry and recovery runs.
+- Structural marker boundaries accept Unicode whitespace, format characters (`Cf`), nonspacing marks (`Mn`) and blank fillers. VT/FF/NEL normalize to newlines; general homoglyph detection is not claimed. Complete anchors and truncation notices count toward byte budgets; front truncation drops partial escaped lines. User data remains untrusted after escaping.
 Group conversations fetch server `GROUP.md`; topics fetch only their own `THREAD.md`. Server notifications may be authored by a human manager or a bot. They are refetch hints, never authoritative updates/deletions: authenticated GET responses remain the source of truth. The per-bot LRU cache expires after 30 seconds, retries failures after 1 second, and coalesces repeated invalidations with a 1-second refetch floor. In-flight updates receive one bounded refetch. Server content is escaped JSON background, budgeted as a complete block so its untrusted label cannot be truncated away. Content/version changes are injected once per SDK session; unchanged documents do not accumulate. Fresh retries always receive full context, and verified deletion explicitly withdraws earlier document contents. Editing the document in Octo takes effect without a bot restart.
 
 The existing operator-only `groupConfigDir/<channelId>.md` remains a separate, trusted local instruction override, reread each turn. It is not a server document cache and is not uploaded to Octo. This change adds server document consumption, not management/write tools.
 
 **Headline feature — IM ↔ terminal Codex interop (opt-in):** each bot conversation maps to a Codex thread. With sharing enabled, you can resume a bot's group conversation from your own terminal via `codex exec resume <threadId>`, and vice versa.
+
+Space attribution verifies topic parent and compound-DM prefixes using the canonical parentGroupNo helper, including group/owner identifiers with underscores and both endpoint orders. It consumes transport metadata, never a user-authored claimed UID. Prompt marker separators use one positive character class with a line-break guard, avoiding overlapping BOM alternatives and exponential backtracking on ordinary text.
 
 ## Install
 
