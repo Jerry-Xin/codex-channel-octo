@@ -236,7 +236,7 @@ describe('E2E smoke tests', () => {
     // queryAgent was called with user message as first arg (user role)
     expect(queryAgent).toHaveBeenCalledTimes(1);
     const userMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(userMsg).toBe('Hi there');
+    expect(userMsg).toBe('\n[Current message — respond to this ONLY]\nHi there');
 
     // Output was sent via sendMessage
     expect(sendMessage).toHaveBeenCalled();
@@ -337,14 +337,14 @@ describe('E2E smoke tests', () => {
     // Turn 1: no prior session → no resume. No prior history yet → nothing injected.
     await simulateMessage(makeDmMsg('first'), cfg, store, router, groupContext, streamRelay);
     expect(seen[0].resume).toBeUndefined();
-    expect(seen[0].userMsg).toBe('first'); // nothing prepended on a truly first turn
+    expect(seen[0].userMsg).toBe('\n[Current message — respond to this ONLY]\nfirst');
     expect(store.getSdkSessionId(USER_UID)).toBe('sdk-session-1');
 
     // Turn 2: resumes the captured id. History lives in the SDK session, so the
     // user message is NOT prefixed with a [Prior conversation history] block.
     await simulateMessage(makeDmMsg('second'), cfg, store, router, groupContext, streamRelay);
     expect(seen[1].resume).toBe('sdk-session-1');
-    expect(seen[1].userMsg).toBe('second');
+    expect(seen[1].userMsg).toBe('\n[Current message — respond to this ONLY]\nsecond');
     expect(seen[1].userMsg).not.toContain('[Prior conversation history');
   });
 
@@ -499,7 +499,7 @@ describe('E2E smoke tests', () => {
     // queryAgent was called with user message in user role
     expect(queryAgent).toHaveBeenCalledTimes(1);
     const userMsg2 = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(userMsg2).toBe('What is this code?');
+    expect(userMsg2).toBe('\n[Current message — respond to this ONLY]\nWhat is this code?');
 
     // Output was sent to group channel
     expect(sendMessage).toHaveBeenCalled();
@@ -615,7 +615,7 @@ describe('E2E smoke tests', () => {
     // carries the prior conversation; first-turn injection only fires when there
     // is no stored session id yet.)
     const secondUserMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
-    expect(secondUserMsg).toBe('Follow up');
+    expect(secondUserMsg).toBe('\n[Current message — respond to this ONLY]\nFollow up');
     expect(secondUserMsg).not.toContain('[Prior conversation history');
 
     // Full history is still recorded in SQLite (durable record / migration / recovery).
@@ -920,7 +920,7 @@ describe('E2E smoke tests', () => {
     // ] and \n inside from_name are replaced with spaces — the malicious
     // marker is no longer at line start, so even after our outer sanitize
     // pass the LLM sees a single continuous header line.
-    const firstLine = userMsg.split('\n')[0];
+    const firstLine = userMsg.split('\n').find((line: string) => line.includes('Alice'))!;
     expect(firstLine).toContain('Alice');
     expect(firstLine).not.toMatch(/\][\r\n]/); // no ] right before newline
     // The injected [Conversation history] never lands at a real line start.
