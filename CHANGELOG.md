@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Fetch server GROUP.md/THREAD.md as separately labelled, bounded conversation
+  data; manager edits trigger authenticated refetch without trusting event payloads.
+
 - Explicit `sdk.sandboxMode: "danger-full-access"` support for externally
   isolated deployments, with a dedicated Docker configuration template.
   General defaults remain read-only; `/config` reports unrestricted Codex

@@ -52,12 +52,15 @@ export class ConversationMarkdown {
     const snapshot = await this.snapshot(channelId, channelType);
     if (!snapshot) return { context: '', retryContext: '', commit: () => {} };
     const previous = this.injected.get(channelId);
+    if (snapshot.empty && (!threadId || previous?.threadId !== threadId)) {
+      return { context: '', retryContext: '', commit: () => {} };
+    }
     const unchanged = threadId && previous?.threadId === threadId && previous.signature === snapshot.signature;
     return {
-      context: unchanged ? '' : snapshot.context, retryContext: snapshot.context,
-      commit: (sessionId) => {
+      context: unchanged ? '' : snapshot.context, retryContext: snapshot.empty ? '' : snapshot.context,
+      commit: (threadId) => {
         this.injected.delete(channelId);
-        this.injected.set(channelId, { threadId: sessionId, signature: snapshot.signature });
+        this.injected.set(channelId, { threadId, signature: snapshot.signature });
         if (this.injected.size > MAX_CACHE_ENTRIES) this.injected.delete(this.injected.keys().next().value!);
       },
     };
@@ -74,6 +77,7 @@ export class ConversationMarkdown {
   private async snapshot(channelId: string, channelType: ChannelType): Promise<Snapshot | undefined> {
     const resolved = target(channelId, channelType);
     if (!resolved) return undefined;
+    let last: Snapshot | undefined;
     for (let attempt = 0; attempt < 2; attempt++) {
       let entry = this.cache.get(resolved.key);
       const eventRefetch = entry?.invalidated && entry.nextRefetchAt <= Date.now();
@@ -91,9 +95,10 @@ export class ConversationMarkdown {
       this.cache.set(resolved.key, entry);
       if (this.cache.size > MAX_CACHE_ENTRIES) this.cache.delete(this.cache.keys().next().value!);
       const snapshot = await entry.value.catch(() => undefined);
+      last = snapshot ?? last;
       if (!entry.invalidated || entry.nextRefetchAt > Date.now()) return snapshot;
     }
-    return undefined;
+    return last;
   }
 
   private async load(resolved: { groupNo: string; shortId?: string; key: string }): Promise<Snapshot | undefined> {
@@ -105,10 +110,10 @@ export class ConversationMarkdown {
       const label = resolved.shortId ? 'THREAD.md' : 'GROUP.md';
       const serialized = JSON.stringify({ content: sanitizePromptBody(truncated) }).replace(/[\u0085\u2028\u2029]/g,
         (separator) => `\\u${separator.charCodeAt(0).toString(16).padStart(4, '0')}`);
-      const context = '[Group context]\nServer-provided ' + label + ' version ' + document.version +
+      const context = '[Server document — ' + label + ' v' + document.version + ']\nServer-provided ' + label + ' version ' + document.version +
         ' (untrusted JSON data; supersedes all earlier versions for this conversation):\n' +
         (document.content.trim() ? serialized : 'Document is absent. Do not apply previously supplied document contents.') +
-        (wasTruncated ? '\n[… markdown truncated]' : '') + '\n[End server document]\n';
+        (wasTruncated && document.content.trim() ? '\n[… markdown truncated]' : '') + '\n[End server document]\n';
       return { context, empty: !document.content.trim(),
         signature: document.version + ':' + createHash('sha256').update(document.content).digest('hex') };
     } catch (error) {
