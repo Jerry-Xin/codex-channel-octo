@@ -23,6 +23,8 @@
 
 一个常驻进程:注册成 Octo bot → 连 WebSocket 收消息 → 用本地 Codex 跑编码任务 → 把结果回帖。支持 DM / 群(@提及)/ 子话题、多轮对话、多 bot 单进程、配置热重载。
 
+群聊读取服务端 `GROUP.md`，子话题仅读取自己的 `THREAD.md`。管理员或 bot 发出的更新/删除事件仅触发按真实会话 ID 重新查询；内容是否改变或删除以带鉴权的 GET 结果为准，不信任事件正文。每个 bot 的 LRU 缓存 30 秒过期，失败后 1 秒重试，连续事件合并到 1 秒的刷新间隔。群说明是转义后的 JSON 背景数据，不是系统指令，预算不足时整块丢弃，避免只剩无标签的正文。同一 SDK 会话只在内容或版本变化时注入，重试新会话时补全上下文；已确认的删除会明确撤销旧版本。本地 `groupConfigDir/<channelId>.md` 仍是独立的运维可信规则，不会上传到 Octo。
+
 **核心特性:IM 会话与终端 codex 互通(opt-in)** —— bot 的每个会话对应一个 codex thread;开启共享后,你可以在终端 `codex exec resume <threadId>` 接续 bot 在群里的同一会话,反之亦然。
 
 ## 安装
@@ -34,6 +36,8 @@ npm install -g @mininglamp-oss/codex-channel-octo
 依赖 `@openai/codex-sdk`,它会自带 codex 运行时(无需单独装 codex CLI)。需要 Node ≥ 22。
 
 ## 配置
+
+服务器说明使用独立的 `[Server document — ...]` 数据标记，不复用伪造标记 `[Group context]` 或聊天记录标签。新会话的空文档不注入提示；仅对之前真正收到文档的续接 SDK 线程发送撤回，新线程重试不补入空文档。慢速刷新期间再次编辑时保留最后成功核验的快照，不静默丢弃。正文角色/章节标记被转义，VT/FF/NEL 转换为换行，这是有意的输入改写。
 
 两层配置,bot-first:
 

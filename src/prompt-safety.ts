@@ -62,7 +62,7 @@ export const MAX_DISPLAY_NAME_LEN = 128;
  * (index.ts) is covered too \u2014 making the "cannot drift into a gap" claim hold.
  */
 const SECTION_MARKER_RE =
-  /^([^\S\r\n]*)\[(Group context|Conversation history|Prior conversation history[^\]]*|Current message[^\]]*|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
+  /^([^\S\r\n]*)\[(Server document[^\]]*|Group context|End server document|… markdown truncated|… earlier context truncated|Conversation history|Prior conversation history[^\]]*|Current message[^\]]*|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
 
 /**
  * The privileged "current message" anchor, emitted by assembleUserMessage

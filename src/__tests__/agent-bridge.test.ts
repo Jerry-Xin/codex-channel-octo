@@ -369,7 +369,7 @@ describe('queryAgent event mapping', () => {
       expect(out).toEqual(['收到']);
       expect(drained).toBe(true);
       expect(warn).toHaveBeenCalledWith(`[codex-channel-octo] non-fatal codex notice: ${notice}`);
-      expect(onSessionId).toHaveBeenCalledWith('valid-tid');
+    expect(onSessionId).toHaveBeenCalledWith('valid-tid', expect.any(String));
       expect(onResumeFailed).not.toHaveBeenCalled();
       expect(calls).toHaveLength(1);
     } finally {

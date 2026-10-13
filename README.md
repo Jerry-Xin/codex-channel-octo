@@ -23,6 +23,10 @@
 
 A long-running process: register as an Octo bot → connect over WebSocket to receive messages → run a coding task with local Codex → post the reply back. Supports DM / group (@mention) / community topics, multi-turn conversations, multiple bots in one process, and config hot-reload.
 
+Group conversations fetch server `GROUP.md`; topics fetch only their own `THREAD.md`. Server notifications may be authored by a human manager or a bot. They are refetch hints, never authoritative updates/deletions: authenticated GET responses remain the source of truth. The per-bot LRU cache expires after 30 seconds, retries failures after 1 second, and coalesces repeated invalidations with a 1-second refetch floor. In-flight updates receive one bounded refetch. Server content is escaped JSON background, budgeted as a complete block so its untrusted label cannot be truncated away. Content/version changes are injected once per SDK session; unchanged documents do not accumulate. Fresh retries always receive full context, and verified deletion explicitly withdraws earlier document contents. Editing the document in Octo takes effect without a bot restart.
+
+The existing operator-only `groupConfigDir/<channelId>.md` remains a separate, trusted local instruction override, reread each turn. It is not a server document cache and is not uploaded to Octo. This change adds server document consumption, not management/write tools.
+
 **Headline feature — IM ↔ terminal Codex interop (opt-in):** each bot conversation maps to a Codex thread. With sharing enabled, you can resume a bot's group conversation from your own terminal via `codex exec resume <threadId>`, and vice versa.
 
 ## Install
@@ -34,6 +38,8 @@ npm install -g @mininglamp-oss/codex-channel-octo
 Depends on `@openai/codex-sdk`, which bundles the Codex runtime (no separate Codex CLI install needed). Requires Node ≥ 22.
 
 ## Configuration
+
+Server documents use a dedicated `[Server document — ...]` data marker, not the reserved `[Group context]` forgery marker or transcript labels. Empty documents generate no context on a fresh session; a withdrawal is sent only to a resumed SDK thread that previously received the document. Fresh retry snapshots omit absent documents. A second manager edit during a slow bounded refetch retains the last successfully verified snapshot instead of dropping it. Current-body role/section replicas are escaped and VT/FF/NEL normalized to newlines; this intentionally rewrites those control characters.
 
 Two-layer, bot-first:
 
