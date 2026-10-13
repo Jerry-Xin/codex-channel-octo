@@ -100,6 +100,10 @@ macOS/Linux 使用可执行代理，在 SDK 的 `readline` 读取之前将 CLI s
 
 解析错误仅记录脱敏类别，不记录被拒绝的事件正文或子进程 stderr。已知线程最多续接一次，不确定的副作用禁止 fresh 重放；不静默丢弃事件。测试用真实 SDK 和合成 CLI 复现，无模型请求、网络请求或私有笔记读取。
 
+代理缺失、不是普通文件或没有执行权限时，适配器只告警一次并提示 `npm run build`，退回直接 SDK 启动；退回模式不提供 Unicode 修复。`dev` 先构建/复制代理再启动 TypeScript watcher，修改 `.mjs` 后需重新 build；`prepack` 确保打包前构建。CI 验证包内执行权限，并在 Node 22/24.10.0 测试。入口解析失败只输出固定诊断，不泄露路径或 stderr；日志保留内置错误类别及白名单 OS/Node 错误码，不信任任意可改写的 name/code。
+
+启动链增加两个 Node 进程；子进程未结束时仍转发可捕获信号，信号退出前刷新代理 stdout。SIGKILL 无法捕获，孤儿清理仍依赖外部监管。官方 CLI shim 保留自身环境设置，但 SDK 的 bundled PATH 注入被绕过；CLI 内部搜索会自行定位 rg，直接 shell 调用 rg 可能需要系统安装。
+
 ### Docker 专用配置
 
 在专用 Docker 容器中，可使用 [`config.bot.docker.example.json`](./config.bot.docker.example.json) 作为该 bot 的配置，默认选择 `danger-full-access`。已有配置只需在 `sdk` 内设置：
@@ -136,7 +140,7 @@ macOS/Linux 使用可执行代理，在 SDK 的 `readline` 读取之前将 CLI s
 
 ```bash
 npm install
-npm run build       # tsc → dist/
+npm run build       # 编译 TypeScript，并复制/设置 JSONL 代理执行权限
 npm test            # vitest
 npm run lint        # eslint --max-warnings 0
 npm run type-check  # tsc --noEmit

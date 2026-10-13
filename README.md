@@ -105,6 +105,10 @@ On macOS/Linux, an executable proxy escapes raw U+2028/U+2029 in CLI stdout befo
 
 JSONL parse failures are logged as redacted categories, not rejected event payloads or subprocess stderr. Known threads may resume at most once; uncertain side effects prevent a fresh replay. Invalid events are never silently discarded. Tests reproduce the Node reader behavior and use the real SDK with synthetic executable fixtures, without model/network requests or private notes.
 
+If the proxy is missing, non-regular or not executable, the adapter warns once with `npm run build` instructions and falls back to direct SDK launch; this fallback does not provide the Unicode workaround. `dev` builds/copies the proxy before starting the TypeScript watcher (re-run build after editing the `.mjs`), and `prepack` builds before packaging. CI validates executable package contents and runs tests on Node 22 and 24.10.0. Bootstrap resolution failures emit a fixed actionable diagnostic, without paths or raw stderr. Logs retain built-in error classes and allowlisted OS/Node error codes; mutable error names/codes are not trusted as safe text.
+
+The launcher chain adds two Node processes. Graceful signals are forwarded while the child remains alive and pending proxy stdout is flushed before signal exit; SIGKILL cannot be handled and external supervision is still needed for orphan cleanup. The official CLI shim preserves its environment setup, but the SDK's own bundled PATH injection is bypassed: native CLI search self-locates ripgrep, while direct shell `rg` may require a system installation.
+
 ### Dedicated Docker configuration
 
 Use [`config.bot.docker.example.json`](./config.bot.docker.example.json) for a dedicated Docker container. That template defaults to `danger-full-access`. For an existing bot, set this field inside `sdk`:
@@ -141,7 +145,7 @@ After that, a bot's group conversation can be resumed in your terminal with `cod
 
 ```bash
 npm install
-npm run build       # tsc → dist/
+npm run build       # compile TypeScript and copy/chmod the JSONL proxy
 npm test            # vitest
 npm run lint        # eslint --max-warnings 0
 npm run type-check  # tsc --noEmit

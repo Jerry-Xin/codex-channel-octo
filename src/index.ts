@@ -802,7 +802,7 @@ export async function handleMessage(
       // recovery couldn't save gets an informative message (upstream returned
       // an incomplete stream); everything else keeps the generic wording.
       const content = isStreamInterruptError(err)
-        ? '模型服务连接中断（上游返回不完整），已自动重试仍未成功，请稍后重发或换个问法。'
+        ? '模型响应流或本地传输解析失败，自动恢复未成功，请稍后重发。'
         : 'An error occurred while processing your message. Please try again.';
       try {
         await sendMessage({

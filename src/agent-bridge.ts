@@ -21,6 +21,7 @@ import { join as pathJoin } from 'node:path';
 import type { Config } from './config.js';
 import { fileURLToPath } from 'node:url';
 import { isSdkJsonlParseError, summarizeAgentError } from './agent-errors.js';
+import { resolveJsonlProxyPath } from './jsonl-proxy-path.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { trustedText, escapeSectionMarkers, CURRENT_MESSAGE_ANCHOR } from './prompt-safety.js';
@@ -337,7 +338,7 @@ export async function* queryAgent(
 
   const env = buildCodexEnv(config.sdk, process.env);
   const codex = new Codex({
-    ...(process.platform !== 'win32' ? { codexPathOverride: fileURLToPath(new URL('./codex-jsonl-proxy.mjs', import.meta.url)) } : {}),
+    codexPathOverride: resolveJsonlProxyPath(fileURLToPath(new URL('./codex-jsonl-proxy.mjs', import.meta.url))),
     ...(config.sdk.codexApiKey ? { apiKey: config.sdk.codexApiKey } : {}),
     ...(config.sdk.codexBaseUrl ? { baseUrl: config.sdk.codexBaseUrl } : {}),
     ...(env ? { env } : {}),

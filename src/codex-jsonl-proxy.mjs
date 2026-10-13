@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 export function escapeJsonlSeparators(text) {
   return text.replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
@@ -20,7 +21,7 @@ export function runCodexJsonlProxy(launcher, args) {
   process.stdout.on('drain', () => child.stdout.resume());
   process.stdout.on('error', () => child.kill('SIGTERM'));
   child.stdout.on('end', () => process.stdout.write(escapeJsonlSeparators(decoder.end())));
-  const forward = (signal) => { if (!child.killed) child.kill(signal); };
+  const forward = (signal) => { if (child.exitCode === null && child.signalCode === null) child.kill(signal); };
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   const handlers = signals.map((signal) => () => forward(signal));
   signals.forEach((signal, index) => process.on(signal, handlers[index]));
@@ -32,12 +33,17 @@ export function runCodexJsonlProxy(launcher, args) {
     process.stdin.unpipe(child.stdin);
     process.stdin.pause();
     signals.forEach((name, index) => process.removeListener(name, handlers[index]));
-    if (signal) process.kill(process.pid, signal);
+    if (signal) process.stdout.write('', () => process.kill(process.pid, signal));
     else process.exitCode = code ?? 1;
   });
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const sdkRequire = createRequire(import.meta.resolve('@openai/codex-sdk'));
-  runCodexJsonlProxy(sdkRequire.resolve('@openai/codex/bin/codex.js'), process.argv.slice(2));
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  try {
+    const sdkRequire = createRequire(import.meta.resolve('@openai/codex-sdk'));
+    runCodexJsonlProxy(sdkRequire.resolve('@openai/codex/bin/codex.js'), process.argv.slice(2));
+  } catch {
+    process.stdout.write(JSON.stringify({ type: 'error', message: 'CODEX_JSONL_PROXY_BOOTSTRAP_FAILURE: reinstall dependencies and run npm run build' }) + '\n');
+    process.exitCode = 1;
+  }
 }
