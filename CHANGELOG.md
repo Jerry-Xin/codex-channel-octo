@@ -21,6 +21,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if they contain, equal, or sit inside a trusted/sensitive directory — the
   session cwd, the config/SOUL tree, `groupConfigDir`, the memory dir, or
   `codexHome` — so a writable root can never overlap the agent's trust anchors.
+- **`sdk.outputSelection`** (`phase` default, `heuristic` opt-in, `legacy`
+  rollback) selects one reply per turn from Codex's agent messages. Delivery
+  and stored history share that single selection. On Codex SDK/CLI 0.142.3 the
+  default `phase` mode still delivers intermediate narration, because no
+  final-answer label is emitted. Suppressing narration requires `heuristic`.
+  Applied at bot start (restart or re-add the bot after editing).
+
+### Changed
+
+- Multiple agent messages in one reply are now separated by a blank line
+  (`legacy` keeps the old concatenation).
+- `maxResponseChars` now bounds the whole delivered reply, including the
+  `[response truncated]` notice. Limits from 1 to 44 truncate without the
+  notice. Stored history is capped the same way instead of keeping the
+  untruncated text. Non-integer and non-positive values are rejected at
+  startup (and ignored with a log on hot reload); positive integers remain
+  supported.
 
 ### Fixed
 

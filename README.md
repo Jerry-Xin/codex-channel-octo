@@ -79,6 +79,34 @@ Existing `mentionFreeGroups` entries remain explicit operator overrides matched
 against the full channel ID. AI sessions covered by the server policy do not
 need individual topic IDs added to this list.
 
+### Reply selection and response limit
+
+A Codex turn can contain several agent messages, for example narration before
+a tool call and the answer after it. The channel picks **one** reply per turn.
+That reply is what users receive and what is stored in conversation history,
+so the two always match. `sdk.outputSelection` controls the choice:
+
+| Value | Behavior |
+|---|---|
+| `phase` (default) | Uses the runtime's final-answer label when present. Otherwise every message is delivered, separated by a blank line. **Codex SDK/CLI 0.142.3 labels no messages, so in this mode intermediate narration is still delivered.** |
+| `heuristic` (opt-in) | Keeps only the messages after the turn's last tool call / command / file change. It falls back to all messages when the turn did not complete, or when that would drop a long earlier message. This is an ordering heuristic, not a final-answer signal. |
+| `legacy` (rollback) | Previous behavior: all messages of the final run, concatenated with no separator. |
+
+When a stream interruption is recovered and the recovery run produces no
+message, the interrupted run's messages are used instead. These may be
+narration.
+
+`maxResponseChars` (default `524288`) caps the reply. An over-limit reply is cut
+so the delivered text, including the trailing `[response truncated]` notice,
+never exceeds the limit. The stored history is capped the same way. Limits from
+1 to 44 truncate without the notice, and a warning is logged at startup.
+**Non-integer and non-positive values are rejected; positive integers remain
+supported.** An invalid value stops startup. During hot reload it is logged and
+ignored, and the running bots keep running.
+
+Both settings apply when a bot starts. After editing them, restart the process
+or re-add the bot under a new id. Hot reload only adds or removes bots by id.
+
 ## Run
 
 ```bash

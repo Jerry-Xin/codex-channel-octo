@@ -20,7 +20,21 @@ vi.mock('../octo/socket.js', () => ({
     connect: vi.fn(), disconnectAndWait: vi.fn().mockResolvedValue(undefined),
   })),
 }));
-vi.mock('../agent-bridge.js', () => ({ queryAgent: vi.fn(), isStreamInterruptError: vi.fn() }));
+vi.mock('../agent-bridge.js', () => {
+  const queryAgent = vi.fn();
+  // index.ts consumes typed events; replay the queryAgent mock's strings as
+  // unclassified messages of one completed attempt.
+  async function* queryAgentEvents(...args: unknown[]) {
+    yield { kind: 'attempt_start', attempt: 0, reason: 'initial', continues: null };
+    let seq = 0;
+    for await (const text of (queryAgent as (...a: unknown[]) => AsyncIterable<string>)(...args)) {
+      yield { kind: 'message', attempt: 0, itemId: `item_${seq}`, seq, text, phase: 'unknown' };
+      seq++;
+    }
+    yield { kind: 'attempt_end', attempt: 0, terminal: 'completed' };
+  }
+  return { queryAgent, queryAgentEvents, isStreamInterruptError: vi.fn() };
+});
 
 import { startBot, type BotStack } from '../index.js';
 import { GroupContext } from '../group-context.js';

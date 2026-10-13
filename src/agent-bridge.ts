@@ -1,6 +1,7 @@
 /**
  * Agent Bridge — OpenAI Codex invocation via @openai/codex-sdk.
- * Outputs AsyncIterable<string> — does not know about Octo API.
+ * Outputs typed AgentOutputEvents (queryAgentEvents) or, for legacy callers,
+ * AsyncIterable<string> (queryAgent) — does not know about Octo API.
  *
  * Security: User input is untrusted IM content. Codex has no system/user role
  * separation like Claude's SDK, so the security boundary is layered:
@@ -285,6 +286,89 @@ export function isStreamInterruptError(err: unknown): boolean {
   return /stream closed before response\.completed|stream disconnected before completion/i.test(m);
 }
 
+/** Output intent of an agent message, read defensively from the raw item. */
+export type MessagePhase = 'commentary' | 'final_answer' | 'unknown';
+
+/**
+ * Typed bridge output. Errors still propagate as thrown exceptions.
+ *
+ * - `seq` is one monotonic counter per `queryAgentEvents` call, assigned at the
+ *   first sight of an `(attempt, itemId)` pair (exec item ids restart per
+ *   process, so the attempt is part of the key).
+ * - `message`: a later snapshot of the same `(attempt, itemId)` is re-emitted
+ *   with the first-sight seq; consumers replace the text in place.
+ * - `work`: emitted exactly once per `(attempt, itemId)` at first sight
+ *   (`item.started` or `item.completed`, whichever comes first). Later updates,
+ *   completion or reconciled completion of that item never emit another one.
+ *   Carries the item type only — never command, arguments, output or text.
+ * - `attempt_start`/`attempt_end` bracket each Codex run. `continues` is the
+ *   attempt whose thread a stream recovery resumes (`null` otherwise).
+ *   `terminal` is `completed` only when `turn.completed` was seen.
+ */
+export type AgentOutputEvent =
+  | { kind: 'attempt_start'; attempt: number; reason: 'initial' | 'stream_recovery' | 'fresh_retry'; continues: number | null }
+  | { kind: 'message'; attempt: number; itemId: string; seq: number; text: string; phase: MessagePhase }
+  | { kind: 'work'; attempt: number; itemId: string; seq: number; itemType: string }
+  | { kind: 'attempt_end'; attempt: number; terminal: 'completed' | 'no_terminal' };
+
+/**
+ * Session options for a query — the single canonical options contract shared
+ * by `queryAgentEvents`, `queryAgent` and their callers.
+ *   - `resume`: a prior Codex thread id to continue.
+ *   - `onSessionId`: called with the thread id observed for this turn.
+ *   - `groupInstructions`: per-group operator instructions (GROUP.md).
+ *   - `onResumeFailed`: called when a stale resume id is cleared.
+ *   - `fallbackRetryPrompt`: pre-assembled prompt for a fresh retry after a
+ *     stale-resume recovery (so history isn't lost).
+ */
+export interface QueryAgentOptions {
+  resume?: string;
+  onSessionId?: (id: string) => void;
+  groupInstructions?: string;
+  onResumeFailed?: () => void;
+  fallbackRetryPrompt?: string;
+}
+
+/** Item types that never form a work boundary. */
+const NON_WORK_ITEM_TYPES = new Set(['agent_message', 'reasoning', 'todo_list', 'error']);
+
+function readPhase(item: ThreadItem): MessagePhase {
+  const phase = (item as { phase?: unknown }).phase;
+  return phase === 'commentary' || phase === 'final_answer' ? phase : 'unknown';
+}
+
+/**
+ * Query Codex with the given user message (legacy string output).
+ *
+ * Thin wrapper over `queryAgentEvents`: yields each completed run's non-empty
+ * agent messages in first-seen order once that run drains, exactly like the
+ * baseline bridge. A run that throws yields nothing.
+ *
+ * @yields the agent's message text (Codex delivers it whole, not char-by-char).
+ */
+export async function* queryAgent(
+  userMessage: string,
+  config: Config,
+  sessionCtx?: SessionCtx,
+  onToolUse?: (toolName: string, toolInput?: unknown) => void,
+  opts?: QueryAgentOptions,
+): AsyncIterable<string> {
+  let buffered = new Map<string, { seq: number; text: string }>();
+  for await (const ev of queryAgentEvents(userMessage, config, sessionCtx, onToolUse, opts)) {
+    if (ev.kind === 'attempt_start') {
+      buffered = new Map();
+    } else if (ev.kind === 'message') {
+      const prev = buffered.get(ev.itemId);
+      buffered.set(ev.itemId, { seq: prev ? prev.seq : ev.seq, text: ev.text });
+    } else if (ev.kind === 'attempt_end') {
+      const ordered = [...buffered.values()].sort((a, b) => a.seq - b.seq);
+      for (const m of ordered) {
+        if (m.text) yield m.text;
+      }
+    }
+  }
+}
+
 /**
  * Query Codex with the given user message.
  *
@@ -300,27 +384,17 @@ export function isStreamInterruptError(err: unknown): boolean {
  * @param onToolUse - Optional callback fired with REDACTED progress per work
  *   item. The bridge stays a pure reporter; a throwing callback never breaks
  *   the stream.
- * @param opts - session options:
- *   - `resume`: a prior Codex thread id to continue.
- *   - `onSessionId`: called with the thread id observed for this turn.
- *   - `onResumeFailed`: called when a stale resume id is cleared.
- *   - `fallbackRetryPrompt`: pre-assembled prompt for a fresh retry after a
- *     stale-resume recovery (so history isn't lost).
- * @yields the agent's final message text (Codex delivers it whole, not char-by-char).
+ * @param opts - session options (see QueryAgentOptions).
+ * @yields typed AgentOutputEvents as they are observed. Nothing reaches the
+ *   user from here; the caller selects the reply after the call returns.
  */
-export async function* queryAgent(
+export async function* queryAgentEvents(
   userMessage: string,
   config: Config,
   sessionCtx?: SessionCtx,
   onToolUse?: (toolName: string, toolInput?: unknown) => void,
-  opts?: {
-    resume?: string;
-    onSessionId?: (id: string) => void;
-    groupInstructions?: string;
-    onResumeFailed?: () => void;
-    fallbackRetryPrompt?: string;
-  },
-): AsyncIterable<string> {
+  opts?: QueryAgentOptions,
+): AsyncIterable<AgentOutputEvent> {
   // Frozen system text (security prefix + SOUL + group instructions).
   const systemPrompt = buildSystemPrompt(config.sdk.systemPrompt, opts?.groupInstructions);
 
@@ -370,28 +444,50 @@ export async function* queryAgent(
     return /thread.*not.*found|no (conversation|session|thread|rollout) found|invalid.*(thread|session)|session.*not.*found|--resume requires a valid/i.test(m);
   };
 
+  // Attempt bookkeeping. `attemptCtx` describes the NEXT run and is set by the
+  // recovery / fresh-retry paths below; `seq` is one counter for the whole call.
+  let attemptCtx: { reason: 'initial' | 'stream_recovery' | 'fresh_retry'; continues: number | null } = {
+    reason: 'initial',
+    continues: null,
+  };
+  let attemptCount = 0;
+  let lastAttempt = -1;
+  let seq = 0;
+
   // Drain one Codex run. Tracks `sideEffect.seen`: set true on ANY command/file/
-  // MCP/web-search event OR once final text is produced — so the caller knows
-  // whether a mid-run failure is still safe to fresh-retry (only before any
-  // side effect, else a retry could duplicate a command or file write).
+  // MCP/web-search event OR once a run completes with message text — so the
+  // caller knows whether a mid-run failure is still safe to fresh-retry (only
+  // before any side effect, else a retry could duplicate a command or file
+  // write).
   async function* runOnce(
     resumeId: string | undefined,
     prompt: string,
     sideEffect: { seen: boolean },
     cap: { threadId?: string },
-  ): AsyncIterable<string> {
+  ): AsyncIterable<AgentOutputEvent> {
+    const attempt = attemptCount++;
+    lastAttempt = attempt;
+    yield { kind: 'attempt_start', attempt, reason: attemptCtx.reason, continues: attemptCtx.continues };
     const thread = resumeId
       ? codex.resumeThread(resumeId, threadOpts)
       : codex.startThread(threadOpts);
     const { events } = await thread.runStreamed(prompt);
 
     let reportedSessionId = false;
-    // agent_message snapshots keyed by item id. Codex (0.142) emits the final
-    // message as a single item.completed with the full text. We key by id and
-    // overwrite so a future item.updated snapshot is handled too; messages are
-    // yielded in first-seen order after the turn drains.
-    const messages = new Map<string, string>();
-    const order: string[] = [];
+    let completed = false;
+    // Latest text per agent_message id, for the post-drain side-effect mark.
+    const latestText = new Map<string, string>();
+    // First-sight seq per item id of THIS run. Codex (0.142) emits each agent
+    // message as a single item.completed with the full text; a future
+    // item.updated snapshot re-emits the same item with its first-sight seq.
+    const firstSight = new Map<string, number>();
+    const sight = (id: string): { seq: number; first: boolean } => {
+      const prev = firstSight.get(id);
+      if (prev !== undefined) return { seq: prev, first: false };
+      const s = seq++;
+      firstSight.set(id, s);
+      return { seq: s, first: true };
+    };
 
     for await (const ev of events as AsyncIterable<ThreadEvent>) {
       switch (ev.type) {
@@ -415,6 +511,11 @@ export async function* queryAgent(
         case 'item.updated':
         case 'item.completed': {
           const item = ev.item;
+          if (!NON_WORK_ITEM_TYPES.has(item.type)) {
+            // Work boundary: once per item, at first sight. Type only.
+            const s = sight(item.id);
+            if (s.first) yield { kind: 'work', attempt, itemId: item.id, seq: s.seq, itemType: item.type };
+          }
           if (isSideEffectItem(item.type)) {
             sideEffect.seen = true;
             // Report redacted progress once per item start/complete.
@@ -442,8 +543,9 @@ export async function* queryAgent(
               }
             }
           } else if (item.type === 'agent_message') {
-            if (!messages.has(item.id)) order.push(item.id);
-            messages.set(item.id, item.text);
+            const s = sight(item.id);
+            latestText.set(item.id, item.text);
+            yield { kind: 'message', attempt, itemId: item.id, seq: s.seq, text: item.text, phase: readPhase(item) };
           } else if (item.type === 'error') {
             const itemMsg = item.message ?? 'codex item error';
             // Codex reports metadata fallback and a resumed session's model
@@ -476,6 +578,7 @@ export async function* queryAgent(
         }
         case 'turn.completed':
           // usage available on ev.usage — left for observability.
+          completed = true;
           break;
         case 'turn.failed':
           throw new Error(ev.error?.message ?? 'codex turn failed');
@@ -484,15 +587,10 @@ export async function* queryAgent(
       }
     }
 
-    // Emit the final agent message(s). Mark side-effect-seen so a post-output
-    // failure is never fresh-retried.
-    for (const id of order) {
-      const text = messages.get(id);
-      if (text) {
-        sideEffect.seen = true;
-        yield text;
-      }
-    }
+    // The run drained. Mark side-effect-seen once it produced text so a
+    // post-output failure is never fresh-retried.
+    if ([...latestText.values()].some((t) => t)) sideEffect.seen = true;
+    yield { kind: 'attempt_end', attempt, terminal: completed ? 'completed' : 'no_terminal' };
   }
 
   const sideEffect = { seen: false };
@@ -512,13 +610,14 @@ export async function* queryAgent(
     resumeId: string | undefined,
     prompt: string,
     se: { seen: boolean },
-  ): AsyncIterable<string> {
+  ): AsyncIterable<AgentOutputEvent> {
     const cap: { threadId?: string } = { threadId: resumeId };
     try {
       yield* runOnce(resumeId, prompt, se, cap);
     } catch (err) {
       if (isStreamInterruptError(err) && !streamRecovered && cap.threadId) {
         streamRecovered = true;
+        attemptCtx = { reason: 'stream_recovery', continues: lastAttempt };
         console.error(
           `[codex-channel-octo] upstream stream interrupted — resuming thread ${cap.threadId} to continue: ${String(err)}`,
         );
@@ -547,6 +646,7 @@ export async function* queryAgent(
       } catch (cbErr) {
         console.error(`[codex-channel-octo] onResumeFailed callback threw: ${String(cbErr)}`);
       }
+      attemptCtx = { reason: 'fresh_retry', continues: null };
       const retryPrompt = opts.fallbackRetryPrompt
         ? `${SECURITY_PROMPT_PREFIX}\n\n---\n\n${opts.fallbackRetryPrompt}`
         : promptText;

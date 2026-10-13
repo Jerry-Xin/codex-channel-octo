@@ -22,7 +22,8 @@
     "_comment_network": "networkAccessEnabled / webSearchEnabled default false. danger-full-access has unrestricted Codex network access regardless of networkAccessEnabled; use container/network policy to restrict it.",
     "networkAccessEnabled": false,
     "webSearchEnabled": false,
-    "_comment_tool_progress": "Set toolProgress=true to post redacted '🔧 <action>…' progress notices as codex works (command/file/tool — never stdout, diff, or full args). Off by default."
+    "_comment_tool_progress": "Set toolProgress=true to post redacted '🔧 <action>…' progress notices as codex works (command/file/tool — never stdout, diff, or full args). Off by default.",
+    "_comment_output_selection": "outputSelection: phase (default) | heuristic (opt-in: keep only messages after the last tool call) | legacy (rollback). On Codex 0.142.3 'phase' still delivers intermediate narration. Applied at bot start."
   },
 
   "rateLimit": {
