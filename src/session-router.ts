@@ -8,6 +8,7 @@ import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
 import { isAuthenticCronFire } from './cron-fire-marker.js';
 import { MentionPreferences } from './mention-prefs.js';
+import { ConversationMarkdown, type ConversationTurnContext } from './conversation-md.js';
 
 export interface RouteResult {
   sessionKey: string;
@@ -65,13 +66,15 @@ export class SessionRouter {
    */
   private readonly knownBotUids = new Set<string>();
   private readonly mentionPreferences: MentionPreferences;
+  private readonly conversationMarkdown: ConversationMarkdown;
 
-  constructor(config: Config, robotId: string, ownerUid = '') {
+  constructor(config: Config, robotId: string, ownerUid = '', documentStore?: import('./conversation-md.js').ConversationDocumentStore) {
     this.config = config;
     this.robotId = robotId;
     this.ownerUid = ownerUid;
     this.knownBotUids.add(robotId);
     this.mentionPreferences = new MentionPreferences(config);
+    this.conversationMarkdown = new ConversationMarkdown(config, documentStore);
   }
 
   /** G14: register another known bot uid (future multi-bot support). */
@@ -96,6 +99,14 @@ export class SessionRouter {
   /** G18: owner_uid stored from registerBot. Used by future permission model. */
   getOwnerUid(): string {
     return this.ownerUid;
+  }
+
+  getConversationMd(channelId: string, channelType: ChannelType): Promise<string | undefined> {
+    return this.conversationMarkdown.get(channelId, channelType);
+  }
+
+  prepareConversationMd(channelId: string, channelType: ChannelType, threadId?: string): Promise<ConversationTurnContext> {
+    return this.conversationMarkdown.prepareTurn(channelId, channelType, threadId);
   }
 
   /**
@@ -350,11 +361,11 @@ export class SessionRouter {
     // message arrives with streamOn=false and contains the complete content.
     if (msg.streamOn) return null;
 
-    // The server sends preference notifications as the bot itself. Handle
-    // these before the self-message guard, without invoking the agent. Other
-    // members can forge event payloads, so only this bot's notifications may
-    // invalidate. Key by the actual channel's parent, never payload.group_no.
+    // Preference events are self-only. Markdown events may come from human
+    // editors and are refetch hints; authenticated GET determines the contents.
+    // Both use the transport channel, never the payload's claimed target.
     if (msg.payload.event) {
+      this.conversationMarkdown.onEvent(msg);
       if (this.isGroupLike(msg.channel_type)
         && msg.from_uid === this.robotId
         && msg.payload.event.type === 'mention_pref_updated') {
