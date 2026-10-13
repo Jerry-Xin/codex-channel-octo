@@ -235,7 +235,7 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   // the result would exceed maxBytes by the marker length (PR #120 review). Slice
   // the buffer to the remaining bytes; a leading partial UTF-8 sequence decodes to
   // a replacement char which we strip so we never emit U+FFFD.
-  const marker = '[… earlier context truncated]\n';
+  const marker = '[… earlier context truncated] ';
   const markerBytes = Buffer.byteLength(marker, 'utf-8');
   const tailBudget = contextBudget - markerBytes;
   if (tailBudget <= 0) {

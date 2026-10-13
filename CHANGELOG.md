@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-turn transport sender metadata with registration ownership normalized for
+  numeric Octo space prefixes; identity is kept out of shared AGENTS.md.
+
 - Explicit `sdk.sandboxMode: "danger-full-access"` support for externally
   isolated deployments, with a dedicated Docker configuration template.
   General defaults remain read-only; `/config` reports unrestricted Codex

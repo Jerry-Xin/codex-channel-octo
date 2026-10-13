@@ -565,7 +565,7 @@ export async function handleMessage(
       // The final user message is assembled AFTER history is built (below), so
       // the one-time history block + group-context delta can be prepended and
       // the whole payload capped together. See the assembly near queryAgent.
-      const userBody = quotePrefix + escapeSectionMarkers(bodyText);
+      const userBody = quotePrefix + sanitizePromptBody(bodyText);
       // G4: Backfill history from API when local cache is empty for groups.
       // Only triggered on first interaction with a group (cold start) to avoid
       // duplicate API calls; checked via a sentinel marker stored in-memory.
