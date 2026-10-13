@@ -19,6 +19,8 @@ import type { ThreadEvent, ThreadItem, ThreadOptions } from '@openai/codex-sdk';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import type { Config } from './config.js';
+import { fileURLToPath } from 'node:url';
+import { isSdkJsonlParseError, summarizeAgentError } from './agent-errors.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { trustedText, escapeSectionMarkers, CURRENT_MESSAGE_ANCHOR } from './prompt-safety.js';
@@ -281,6 +283,7 @@ function isSideEffectItem(type: ThreadItem['type']): boolean {
  * before response.completed)").
  */
 export function isStreamInterruptError(err: unknown): boolean {
+  if (isSdkJsonlParseError(err)) return true;
   const m = err instanceof Error ? err.message : String(err);
   return /stream closed before response\.completed|stream disconnected before completion/i.test(m);
 }
@@ -334,6 +337,7 @@ export async function* queryAgent(
 
   const env = buildCodexEnv(config.sdk, process.env);
   const codex = new Codex({
+    ...(process.platform !== 'win32' ? { codexPathOverride: fileURLToPath(new URL('./codex-jsonl-proxy.mjs', import.meta.url)) } : {}),
     ...(config.sdk.codexApiKey ? { apiKey: config.sdk.codexApiKey } : {}),
     ...(config.sdk.codexBaseUrl ? { baseUrl: config.sdk.codexBaseUrl } : {}),
     ...(env ? { env } : {}),
@@ -517,10 +521,11 @@ export async function* queryAgent(
     try {
       yield* runOnce(resumeId, prompt, se, cap);
     } catch (err) {
+      if (isSdkJsonlParseError(err)) se.seen = true;
       if (isStreamInterruptError(err) && !streamRecovered && cap.threadId) {
         streamRecovered = true;
         console.error(
-          `[codex-channel-octo] upstream stream interrupted — resuming thread ${cap.threadId} to continue: ${String(err)}`,
+          `[codex-channel-octo] upstream stream interrupted — resuming thread ${cap.threadId} to continue: ${summarizeAgentError(err)}`,
         );
         const continuationPrompt = `${SECURITY_PROMPT_PREFIX}\n\n---\n\n上次回复因连接中断未完成。请基于你已经完成的工作，直接继续并给出最终结论，不要重复已执行过的步骤。`;
         // Recovery run is OUTSIDE the try above: a second interrupt propagates
@@ -540,7 +545,7 @@ export async function* queryAgent(
     // prompt (carries history) so continuity isn't lost.
     if (opts?.resume && !sideEffect.seen && isResumeError(err)) {
       console.error(
-        `[codex-channel-octo] resume failed for a stale thread id — clearing and retrying fresh: ${String(err)}`,
+        `[codex-channel-octo] resume failed for a stale thread id — clearing and retrying fresh: ${summarizeAgentError(err)}`,
       );
       try {
         opts.onResumeFailed?.();

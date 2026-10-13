@@ -16,6 +16,7 @@ import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
 import { queryAgent, isStreamInterruptError } from './agent-bridge.js';
+import { summarizeAgentError } from './agent-errors.js';
 import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody } from './prompt-safety.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { cleanupExpiredCwds, resolveSessionCwd } from './cwd-resolver.js';
@@ -58,7 +59,7 @@ function configPathForWatch(): string {
 async function main(): Promise<void> {
   // --- Q8: Global unhandled rejection handler ---
   process.on('unhandledRejection', (reason) => {
-    console.error('[codex-channel-octo] Unhandled rejection:', reason instanceof Error ? reason.message : reason);
+    console.error('[codex-channel-octo] Unhandled rejection:', summarizeAgentError(reason));
   });
 
   // --- Config ---
@@ -248,7 +249,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
       if (msg.from_uid === gateway.botId && msg.payload.event?.type !== 'mention_pref_updated') return;
       const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
         .catch((err) => {
-          console.error(`[codex-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
+          console.error(`[codex-channel-octo] ${label}Unhandled message handler error:`, summarizeAgentError(err));
         })
         .finally(() => {
           activeHandlers.delete(p);
@@ -796,7 +797,7 @@ export async function handleMessage(
       }
 
     } catch (err) {
-      console.error(`[codex-channel-octo] Error processing message (session=${result.sessionKey}):`, String(err));
+      console.error(`[codex-channel-octo] Error processing message (session=${result.sessionKey}):`, summarizeAgentError(err));
       // Best-effort error reply. A stream interrupt that even one-shot resume
       // recovery couldn't save gets an informative message (upstream returned
       // an incomplete stream); everything else keeps the generic wording.

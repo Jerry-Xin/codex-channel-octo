@@ -94,6 +94,12 @@ IM 输入是**不可信**的,权限边界是 **sandbox**,不是 prompt:
 - 安全前缀(防注入)写入每会话沙箱的 `AGENTS.md` 并在 prompt 顶部重申(纵深防御,但仅软约束)。
 - 每 bot 独立 `CODEX_HOME`,IM 内容默认不落入个人 `~/.codex`。
 
+### Unicode JSONL 传输兼容
+
+macOS/Linux 使用可执行代理，在 SDK 的 `readline` 读取之前将 CLI stdout 中的 U+2028/U+2029 转义。这两个字符在 JSON 字符串中合法，但 Node v24.10.0 将其视为行尾，可能拆坏合法事件，引发 `Failed to parse item` 并终止 SDK 子进程。转义不改变解码后的正文；代理保持 UTF-8 分块、stdin/stderr、背压和信号转发，并解析所安装 SDK 对应的 CLI 依赖。Windows 仍直接启动 SDK，此 Unix 方案不宣称解决 Windows 上的问题。
+
+解析错误仅记录脱敏类别，不记录被拒绝的事件正文或子进程 stderr。已知线程最多续接一次，不确定的副作用禁止 fresh 重放；不静默丢弃事件。测试用真实 SDK 和合成 CLI 复现，无模型请求、网络请求或私有笔记读取。
+
 ### Docker 专用配置
 
 在专用 Docker 容器中，可使用 [`config.bot.docker.example.json`](./config.bot.docker.example.json) 作为该 bot 的配置，默认选择 `danger-full-access`。已有配置只需在 `sdk` 内设置：
