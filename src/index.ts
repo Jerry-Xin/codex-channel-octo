@@ -15,7 +15,17 @@ import { SessionStore } from './session-store.js';
 import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
-import { queryAgent, isStreamInterruptError } from './agent-bridge.js';
+import { queryAgentEvents, isStreamInterruptError } from './agent-bridge.js';
+import type { QueryAgentOptions } from './agent-bridge.js';
+import {
+  OutputCollector,
+  DEFAULT_OUTPUT_SELECTION_MODE,
+  DEFAULT_MAX_RESPONSE_CHARS,
+  describeSelection,
+  isSmallResponseLimit,
+  type OutputSelectionMode,
+  type SelectedOutput,
+} from './output-selection.js';
 import { summarizeAgentError } from './agent-errors.js';
 import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody } from './prompt-safety.js';
 import type { SessionCtx } from './cwd-resolver.js';
@@ -159,6 +169,11 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     `sdk.approvalPolicy=${config.sdk.approvalPolicy ?? 'never'}, ` +
     `rateLimit=${config.rateLimit.maxPerMinute} req/min`,
   );
+  if (isSmallResponseLimit(config.maxResponseChars)) {
+    console.warn(
+      `[codex-channel-octo] ${label}maxResponseChars=${config.maxResponseChars} is too small for the truncation notice; truncating without it`,
+    );
+  }
 
   // --- Q3: per-session cwd cleanup (7d TTL) ---
   cleanupExpiredCwds(cwdBase);
@@ -722,7 +737,7 @@ export async function handleMessage(
       // queryAgent recovers by calling onResumeFailed (clear the bad id) and
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
-      let sessionOpts: Parameters<typeof queryAgent>[4] = {
+      let sessionOpts: QueryAgentOptions | undefined = {
         senderContext: buildSenderContext(msg, router.getOwnerUid()),
         ...(resume ? { resume } : {}),
         onSessionId: (id: string, prompt: string) => {
@@ -750,15 +765,20 @@ export async function handleMessage(
         }
       }
 
-      const rawChunks = queryAgent(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);
+      const agentEvents = queryAgentEvents(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);
 
-      // Tee the generator: collect full text while streaming to Octo
-      const collected: string[] = [];
-      async function* teeChunks(): AsyncIterable<string> {
-        for await (const chunk of rawChunks) {
-          collected.push(chunk);
-          yield chunk;
-        }
+      // Select ONE reply for both delivery and history. The relay drains the
+      // agent run through this iterable (so the typing heartbeat covers it),
+      // then receives exactly one chunk: the selected, already-capped text. If
+      // the agent throws, nothing is yielded, delivered or stored.
+      const outputMode = (config.sdk.outputSelection ?? DEFAULT_OUTPUT_SELECTION_MODE) as OutputSelectionMode;
+      let selected: SelectedOutput | undefined;
+      async function* selectedChunks(): AsyncIterable<string> {
+        const collector = new OutputCollector();
+        for await (const ev of agentEvents) collector.push(ev);
+        selected = collector.select({ mode: outputMode, maxChars: config.maxResponseChars ?? DEFAULT_MAX_RESPONSE_CHARS });
+        console.log(describeSelection(selected, outputMode, collector.attemptCount));
+        if (selected.text) yield selected.text;
       }
 
       // --- Stream output to Octo ---
@@ -772,7 +792,7 @@ export async function handleMessage(
       const isValidMentionUid = isGroup
         ? (uid: string): boolean => groupContext.isMember(channelId, uid)
         : undefined;
-      await streamRelay.deliver(channelId, channelType, teeChunks(), config.apiUrl, config.botToken, config.maxResponseChars, outboundNameToUid, isValidMentionUid);
+      await streamRelay.deliver(channelId, channelType, selectedChunks(), config.apiUrl, config.botToken, config.maxResponseChars, outboundNameToUid, isValidMentionUid);
 
       // G8: Send read receipt after processing (fire-and-forget)
       if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
@@ -786,7 +806,8 @@ export async function handleMessage(
       }
 
       // --- Store assistant response in history ---
-      const fullResponse = collected.join('');
+      // Same bytes the relay received (mention rendering is delivery-only).
+      const fullResponse = selected?.text ?? '';
       if (fullResponse) {
         store.appendAssistant(sessionKey, fullResponse, msg.message_seq, botId);
         // G10: mark this message_seq as the last one we replied to. Next turn's

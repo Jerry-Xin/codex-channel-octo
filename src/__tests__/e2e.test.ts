@@ -38,11 +38,25 @@ vi.mock('../octo/api.js', () => ({
 
 vi.mock('../agent-bridge.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../agent-bridge.js')>();
+  const queryAgent = vi.fn();
+  // index.ts consumes typed events; replay each string the queryAgent mock
+  // yields as one unclassified message of a single completed attempt. A plain
+  // function (not vi.fn) so clearAllMocks never drops the pass-through.
+  async function* queryAgentEvents(...args: Parameters<typeof original.queryAgentEvents>) {
+    yield { kind: 'attempt_start' as const, attempt: 0, reason: 'initial' as const, continues: null };
+    let seq = 0;
+    for await (const text of (queryAgent as (...a: unknown[]) => AsyncIterable<string>)(...args)) {
+      yield { kind: 'message' as const, attempt: 0, itemId: `item_${seq}`, seq, text, phase: 'unknown' as const };
+      seq++;
+    }
+    yield { kind: 'attempt_end' as const, attempt: 0, terminal: 'completed' as const };
+  }
   return {
     ...original,
     buildSystemPrompt: original.buildSystemPrompt,
     sanitizeForSystemPrompt: original.sanitizeForSystemPrompt,
-    queryAgent: vi.fn(),
+    queryAgent,
+    queryAgentEvents,
   };
 });
 

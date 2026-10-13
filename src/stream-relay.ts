@@ -16,6 +16,7 @@ import {
   sendMessage,
 } from "./octo/api.js";
 import { resolveMentions } from "./mention-utils.js";
+import { TRUNCATION_SUFFIX, DEFAULT_MAX_RESPONSE_CHARS } from "./output-selection.js";
 import { summarizeAgentError } from "./agent-errors.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -25,12 +26,6 @@ const TYPING_INTERVAL_MS = 5_000;
 
 /** Maximum characters per message segment. */
 const MAX_SEGMENT_CHARS = 3_500;
-
-/** Default maximum accumulated response length before truncation (Q32). */
-const DEFAULT_MAX_RESPONSE_CHARS = 524_288; // 512 KB
-
-/** Truncation suffix appended when response exceeds limit. */
-const TRUNCATION_SUFFIX = '\n\n[response truncated]';
 
 // ─── Message Splitting ─────────────────────────────────────────────────────
 
