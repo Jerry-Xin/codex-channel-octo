@@ -48,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove overlapping separator alternatives that let BOM-prefixed ordinary
   text cause exponential prompt-escaping backtracking; derive topic ownership
   from the parent channel and sender prefix boundaries from the complete owner UID.
+- Preserve JSONL events containing Unicode LS/PS on Unix, safely fall back when
+  the proxy is unavailable, and redact event payloads while retaining error classes/codes.
+
 - Drop the first partial line of front-truncated escaped history, preventing a
   sliced-off escape from introducing a second privileged current-message anchor.
 - Persist server-document injection signatures alongside SDK session mappings,
