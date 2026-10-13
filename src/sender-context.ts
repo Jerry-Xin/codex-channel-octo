@@ -8,7 +8,12 @@ export function buildSenderContext(message: BotMessage, ownerUid: string): SafeT
   const channelId = typeof message.channel_id === 'string' && message.channel_id.length > 0
     && message.channel_id.length <= 512 ? message.channel_id : null;
   const senderSpace = transportSpaceId(senderUid, ownerUid);
-  const matchesChannel = channelId !== null && parentGroupNo(channelId).split('@').every((endpoint) => endpoint.startsWith(`s${senderSpace}_`));
+  // Topic syntax belongs only to topic channels; DM endpoint UIDs are opaque.
+  // Truncating a whole compound DM at `____` can hide a cross-space endpoint.
+  const ownershipChannel = channelId !== null && message.channel_type === ChannelType.CommunityTopic
+    ? parentGroupNo(channelId) : channelId;
+  const matchesChannel = ownershipChannel !== null
+    && ownershipChannel.split('@').every((endpoint) => endpoint.startsWith(`s${senderSpace}_`));
   const metadata = {
     from_uid: senderUid,
     channel_id: channelId,

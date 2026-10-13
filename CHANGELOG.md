@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Treat compound-DM endpoint UIDs as opaque, applying topic parent extraction
+  only to topic channels so literal `____` cannot hide a cross-space endpoint.
+
 - Keep section suffixes within one line and outside nested opening brackets;
   restore punctuation-delimited role labels and verify compound DM/topic channel
   prefixes against the sender-derived candidate rather than guessing UID boundaries.

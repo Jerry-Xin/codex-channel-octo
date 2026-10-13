@@ -26,6 +26,11 @@ describe('malformed-header and role-boundary guards', () => {
       }
     }
   });
+  it.each(['\n', '\r', '\u2028', '\u2029'])('never interprets a marker split across %j as a single-line header', (separator) => {
+    for (const text of [`[Group${separator}context]`, `[${separator}Current message]`, `[${separator}assistant]:`]) {
+      expect(sanitizePromptBody(text)).toBe(text);
+    }
+  });
   it('does not match a suffix across a nested opening bracket on the same line', () => {
     const text = '[Current sender metadata[nested]\n' + CURRENT_SENDER_ANCHOR;
     expect(escapeSectionMarkers(text)).toBe('[Current sender metadata[nested]\n\\' + CURRENT_SENDER_ANCHOR);

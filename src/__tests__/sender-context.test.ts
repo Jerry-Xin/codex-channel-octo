@@ -111,6 +111,23 @@ describe('trusted current sender context', () => {
       expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_s1_owner', channel_id }), 's1_owner')).is_owner).toBe(false);
     }
   });
+  it.each(['owner____id', 'owner____id____tail'].flatMap((owner) =>
+    ['sB_bot', 'sB_bot____opaque'].flatMap((peer) => [
+      [owner, `sA_${owner}@${peer}`], [owner, `${peer}@sA_${owner}`],
+    ])))('rejects every cross-space DM endpoint for opaque registration %s in %s', (owner, channel_id) => {
+    expect(metadata(buildSenderContext(message({ from_uid: `sA_${owner}`, channel_id }), owner))).toEqual({
+      from_uid: `sA_${owner}`, channel_id, channel_type: ChannelType.DM, is_owner: false,
+    });
+  });
+
+  it.each(['owner____id', 'owner____id____tail'].flatMap((owner) => [
+    [owner, `sA_${owner}@sA_bot____opaque`], [owner, `sA_bot____opaque@sA_${owner}`],
+  ]))('retains same-space DM attribution for opaque registration %s in %s', (owner, channel_id) => {
+    expect(metadata(buildSenderContext(message({ from_uid: `sA_${owner}`, channel_id }), owner))).toEqual({
+      from_uid: `sA_${owner}`, channel_id, channel_type: ChannelType.DM, is_owner: true,
+    });
+  });
+
   it.each([undefined, '', 'group', 'group____topic'])('does not infer prefixed ownership without a verifiable channel %s', (channel_id) => {
     expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_evil_owner', channel_id }), 'owner')).is_owner).toBe(false);
     expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceA_owner', channel_id }), 'owner')).is_owner).toBe(false);
