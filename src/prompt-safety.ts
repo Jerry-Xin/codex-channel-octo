@@ -1,6 +1,6 @@
 /**
  * Prompt-safety helpers — the SINGLE source of truth for neutralizing
- * user-controlled text before it enters the agent system prompt.
+ * user-controlled text before it enters an agent instruction or user turn.
  *
  * Threat: the system prompt is a flat string with structural markers —
  * section headers (`[Group context]`, `[Conversation history]`, `[Quoted
@@ -17,6 +17,8 @@
  *    role label so it is inert text, not a turn boundary).
  *  - Assembled blocks -> escapeSectionMarkers (escape a line-leading SECTION
  *    header). Orthogonal to the above; applied once per block.
+ *  - Transport identity -> safeSenderMetadata (bounded fields in a single-line
+ *    JSON value under an adapter-only marker, never in shared instructions).
  *
  * Escaping is per-FRAGMENT, before the fragment is wrapped in a label — you
  * cannot escape the assembled block, because that would also clobber the
@@ -61,8 +63,17 @@ export const MAX_DISPLAY_NAME_LEN = 128;
  * history[^\]]*` is included so the first-turn/fallback history header
  * (index.ts) is covered too \u2014 making the "cannot drift into a gap" claim hold.
  */
-const SECTION_MARKER_RE =
-  /^([^\S\r\n]*)\[[ \t\u200b-\u200d\ufeff]*(Group context|Conversation history|Prior conversation history[^\]]*|[CС]urrent[ \t\u200b-\u200d\ufeff]+message[^\]]*|[CС]urrent[ \t\u200b-\u200d\ufeff]+sender[ \t\u200b-\u200d\ufeff]+metadata[^\]]*|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
+const MARKER_SEPARATOR = '(?:[^\\S\\r\\n\\u2028\\u2029]|[\\u00ad\\u180e\\u200b-\\u200f\\u2060\\ufeff])';
+const SECTION_NAMES = [
+  'Group context', 'Conversation history', 'Prior conversation history[^\\]]*',
+  'Current message[^\\]]*', 'Current sender metadata[^\\]]*',
+  'Quoted message from[^\\]]*', 'answered history', 'new messages',
+  'Recent group messages', 'Group instructions',
+  '… earlier context truncated', '… user input truncated to cap',
+];
+const SECTION_MARKER_RE = new RegExp(
+  `^(${MARKER_SEPARATOR}*)\\[(${MARKER_SEPARATOR}*(?:${SECTION_NAMES.map((name) => name.replace(/ /g, `${MARKER_SEPARATOR}+`)).join('|')}))\\]`, 'gim',
+);
 
 /**
  * The privileged "current message" anchor, emitted by assembleUserMessage
@@ -88,8 +99,9 @@ export const CURRENT_SENDER_ANCHOR = '[Current sender metadata — adapter-provi
  * anchors after LF/CR/LS/PS, NOT NEL(U+0085)/VT(U+000B)/FF(U+000C), which a
  * model may still treat as a new line.
  */
-const ROLE_LABEL_RE =
-  /^([^\S\r\n]*)(\[(?:user|assistant)\b[^\]\r\n]*\]:)/gim;
+const ROLE_LABEL_RE = new RegExp(
+  `^(${MARKER_SEPARATOR}*)(\\[${MARKER_SEPARATOR}*(?:user|assistant)(?=${MARKER_SEPARATOR}|\\])[^\\]\\r\\n\\u2028\\u2029]*\\]:)`, 'gim',
+);
 
 /** Bracket delimiters + all line/para separators that could forge a boundary. */
 const NAME_UNSAFE_RE = /[[\]\r\n\v\f\u0085\u2028\u2029]/g;
@@ -175,6 +187,12 @@ export function trustedText(text: string): SafeText {
   return text as SafeText;
 }
 
+/**
+ * Mint an adapter identity block, not user-authored framing. Callers bound field
+ * lengths first. JSON escapes controls in channel_id; explicit NEL/LS/PS escapes
+ * close the remaining single-line gaps even though channel_id permits controls.
+ * This is model attribution, never host authorization or universal confusable detection.
+ */
 export function safeSenderMetadata(metadata: Record<string, unknown>): SafeText {
   const serialized = JSON.stringify(metadata).replace(/[\u0085\u2028\u2029]/g,
     (separator) => `\\u${separator.charCodeAt(0).toString(16).padStart(4, '0')}`);

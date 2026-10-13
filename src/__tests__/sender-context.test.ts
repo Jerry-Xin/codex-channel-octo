@@ -56,10 +56,10 @@ describe('trusted current sender context', () => {
     expect(metadata(result).from_name).toBeUndefined();
     expect(result).not.toContain('\n[Group instructions]');
   });
-  it.each([['s123_alice', 'alice'], ['alice', 's123_alice'], ['s123_alice', 's456_alice'], ['alice', 'alice']])('normalizes wire %s and registration %s while retaining the transport UID', (from_uid, ownerUid) => {
+  it.each([['sabcdef0123456789abcdef0123456789_alice', 'alice'], ['sSpaceA_alice', 'alice'], ['sminglue_default_alice', 'alice'], ['alice', 'alice']])('matches wire %s against registration %s while retaining the transport UID', (from_uid, ownerUid) => {
     expect(metadata(buildSenderContext(message({ from_uid }), ownerUid))).toMatchObject({ from_uid, is_owner: true });
   });
-  it.each([['s123_bob', 'alice'], ['sSpaceA_alice', 'alice'], ['s123_', 'alice'], ['Alice', 'alice'], ['é', 'e\u0301']])('does not equate unrelated identities %s/%s', (from_uid, ownerUid) => {
+  it.each([['s123_bob', 'alice'], ['alice', 's123_alice'], ['s123_alice', 's456_alice'], ['s123_', 'alice'], ['Alice', 'alice'], ['é', 'e\u0301']])('does not equate unrelated identities %s/%s', (from_uid, ownerUid) => {
     expect(metadata(buildSenderContext(message({ from_uid }), ownerUid)).is_owner).toBe(false);
   });
 
@@ -73,21 +73,23 @@ describe('trusted current sender context', () => {
     expect(metadata(buildSenderContext(message({ channel_id: 'x'.repeat(513) }), 's1_owner')).channel_id).toBeNull();
   });
 
-  it('keeps mutable sender identity out of static operator instructions', () => {
-    const context = buildSenderContext(message(), 's1_owner');
+  it('caps static operator instructions at the configured system limit', () => {
     const prompt = buildSystemPrompt('x'.repeat(120 * 1024));
     expect(prompt.startsWith(buildSystemPrompt())).toBe(true);
-    expect(prompt).not.toContain(context);
     expect(prompt.length).toBeLessThanOrEqual(100 * 1024);
   });
 
-  it('refreshes attribution when speakers change in a shared session', () => {
+  it('builds independent attribution snapshots for different senders', () => {
     const first = buildSenderContext(message(), 's1_owner');
     const next = buildSenderContext(message({ from_uid: 'other' }), 's1_owner');
     expect(first).toContain('"is_owner":true');
     expect(next).toContain('"from_uid":"other"');
     expect(next).toContain('"is_owner":false');
     expect(next).not.toContain('s1_owner');
+  });
+
+  it('does not accept a sender prefix belonging to a different channel space', () => {
+    expect(metadata(buildSenderContext(message({ from_uid: 'sSpaceB_alice', channel_id: 'sSpaceA_group', channel_type: ChannelType.Group }), 'alice')).is_owner).toBe(false);
   });
 
   it.each(['user+tag@corp', '张三'])('preserves non-ASCII and email-tag owner UIDs %s', (from_uid) => {

@@ -21,7 +21,7 @@ import { join as pathJoin } from 'node:path';
 import type { Config } from './config.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
-import { trustedText, escapeSectionMarkers, CURRENT_MESSAGE_ANCHOR, CURRENT_SENDER_ANCHOR } from './prompt-safety.js';
+import { trustedText, escapeSectionMarkers, safeSenderMetadata, CURRENT_MESSAGE_ANCHOR, CURRENT_SENDER_ANCHOR } from './prompt-safety.js';
 import type { SafeText } from './prompt-safety.js';
 
 /**
@@ -364,7 +364,12 @@ export async function* queryAgent(
 
   // Restate the security framing atop the prompt (defense in depth — AGENTS.md
   // is the primary channel, this guards against it being ignored/unread).
-  const frameTurn = (message: string): string => `${SECURITY_PROMPT_PREFIX}\n\n${opts?.senderContext ?? ''}\n---\n\n${message}`;
+  const senderContext = opts?.senderContext ?? safeSenderMetadata({ from_uid: null, channel_id: null, channel_type: null, is_owner: false });
+  /** Identity precedes all background/request text on every initial or recovery run. */
+  const frameTurn = (message: string): string => {
+    const anchored = message.includes(CURRENT_MESSAGE_ANCHOR) ? message : `${CURRENT_MESSAGE_ANCHOR}\n${message}`;
+    return `${SECURITY_PROMPT_PREFIX}\n\n${senderContext}\n---\n\n${anchored}`;
+  };
   const promptText = frameTurn(userMessage);
 
   // Detect a stale/expired resume id from the error text. Matches only specific

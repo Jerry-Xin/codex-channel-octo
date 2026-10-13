@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { trustedText } from '../prompt-safety.js';
+import { trustedText, safeSenderMetadata } from '../prompt-safety.js';
 
 // ─── Mock the SDK ────────────────────────────────────────────────────────────
 // Each test sets `scriptedRuns`: an array of async generators, one per
@@ -287,11 +287,29 @@ describe('queryAgent event mapping', () => {
     }
   });
 
-  it('still sends current identity when instruction refresh fails in a read-only turn', async () => {
+  it('still sends current identity when instruction refresh failure downgrades a writable turn', async () => {
     scriptedRuns = [async function* () { yield started('read-only'); yield msg('one', 'ok'); yield turnDone; }];
-    const config = { ...cfg(), cwd: '/dev/null/ws', cwdBase: '/dev/null/ws' };
-    await collect(queryAgent('hello', config, undefined, undefined, { senderContext: trustedText('sender=current') }));
-    expect(prompts[0]).toContain('sender=current');
+    const config = { ...cfg(), cwd: '/dev/null/ws', cwdBase: '/dev/null/ws', sdk: { sandboxMode: 'workspace-write' as const, allowWorkspaceWrite: true } };
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await collect(queryAgent('hello', config, undefined, undefined, { senderContext: trustedText('sender=current') }));
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('forcing read-only'));
+      expect(calls[0].opts).toMatchObject({ sandboxMode: 'read-only' });
+      expect(prompts[0]).toContain('sender=current');
+    } finally { warning.mockRestore(); }
+  });
+  it('supersedes an earlier owner with explicit unknown identity when resuming without sender context', async () => {
+    scriptedRuns = [
+      async function* () { yield started('shared'); yield msg('one', 'ok'); yield turnDone; },
+      async function* () { yield started('shared'); yield msg('two', 'ok'); yield turnDone; },
+    ];
+    await collect(queryAgent('first', cfg(), undefined, undefined, { senderContext: safeSenderMetadata({ from_uid: 'owner', is_owner: true }) }));
+    await collect(queryAgent('second', cfg(), undefined, undefined, { resume: 'shared' }));
+    expect(calls[1]).toMatchObject({ kind: 'resume', resumeId: 'shared' });
+    expect(prompts[1]).toContain('"from_uid":null');
+    expect(prompts[1]).toContain('"is_owner":false');
+    expect(prompts[0]).toContain('"is_owner":true');
+    expect(prompts[1]).not.toContain('"is_owner":true');
   });
   it('yields the final agent message and captures threadId', async () => {
     const seen: string[] = [];

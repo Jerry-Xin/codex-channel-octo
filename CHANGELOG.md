@@ -9,8 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Per-turn transport sender metadata with registration ownership normalized for
-  numeric Octo space prefixes; identity is kept out of shared AGENTS.md.
+- Per-turn transport sender metadata matched to the registration UID or its
+  single prefix in the transport space (including UUID/operator-named spaces);
+  identity is kept out of shared AGENTS.md. Unicode whitespace/invisibles are
+  handled consistently around section and role markers. Every request has an
+  anchor; absent sender metadata explicitly fails closed on resumed threads.
 
 - Explicit `sdk.sandboxMode: "danger-full-access"` support for externally
   isolated deployments, with a dedicated Docker configuration template.

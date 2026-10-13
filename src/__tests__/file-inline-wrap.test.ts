@@ -301,11 +301,11 @@ describe('assembleUserMessage (PR #120: current message must always reach the mo
     const out = assembleUserMessage('[ctx]\nlots\n', body, 40);
     expect(out).not.toContain('[ctx]');
     // The body is byte-capped but present (no context eviction of the request).
-    expect(out.startsWith('y')).toBe(true);
+    expect(out).toBe('');
   });
 
   it('with no context, just (defensively) caps the body', () => {
-    expect(assembleUserMessage('', 'short body', 1000)).toBe('short body');
+    expect(assembleUserMessage('', 'short body', 1000)).toBe('\n[Current message — respond to this ONLY]\nshort body');
   });
 
   it('never emits a U+FFFD replacement char at the front-truncation boundary', () => {

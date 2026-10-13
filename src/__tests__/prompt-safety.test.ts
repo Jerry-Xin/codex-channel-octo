@@ -153,7 +153,7 @@ describe('escapeSectionMarkers', () => {
 });
 
 describe('sanitizePromptBody (both layers)', () => {
-  it('escapes every current-sender marker replica, including indented and NEL-separated background copies', () => {
+  it('escapes the emitted sender anchor and an indented NEL-separated copy', () => {
     expect(escapeSectionMarkers(CURRENT_SENDER_ANCHOR)).toBe('\\' + CURRENT_SENDER_ANCHOR);
     expect(sanitizePromptBody('history\u0085 ' + CURRENT_SENDER_ANCHOR)).toContain(' \\' + CURRENT_SENDER_ANCHOR);
   });

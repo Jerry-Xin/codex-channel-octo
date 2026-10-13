@@ -152,7 +152,7 @@ describe('production socket → gateway → onInbound → router wiring', () => 
 
   it.each([
     ['human', 'Human', true],
-    ['s123_human', 'Human', true],
+    ['sabcdef0123456789abcdef0123456789_human', 'Human', true],
     ['stranger', 'Human', false],
   ])('passes transport sender %s and registration-derived ownership to the agent', async (from_uid, from_name, is_owner) => {
     vi.mocked(queryAgent).mockImplementation(async function* () { yield 'reply'; });

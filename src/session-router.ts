@@ -8,6 +8,7 @@ import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
 import { isAuthenticCronFire } from './cron-fire-marker.js';
 import { MentionPreferences } from './mention-prefs.js';
+import { transportSpaceId } from './owner-identity.js';
 
 export interface RouteResult {
   sessionKey: string;
@@ -260,26 +261,10 @@ export class SessionRouter {
     // For groups, channel_id already provides isolation
     if (this.isGroupLike(msg.channel_type)) return "";
     // DM: try from_uid first (format: s{spaceId}_{peerId})
-    const uid = msg.from_uid;
-    if (uid.startsWith("s")) {
-      const lastUnderscore = uid.lastIndexOf("_");
-      if (lastUnderscore > 0) {
-        return uid.substring(1, lastUnderscore);
-      }
-    }
+    const spaceId = transportSpaceId(msg.from_uid);
+    if (spaceId) return spaceId;
     // DM compound: s{spaceId}_{uid1}@s{spaceId}_{uid2}
-    const channelId = msg.channel_id;
-    if (channelId && channelId.startsWith("s")) {
-      const atIdx = channelId.indexOf("@");
-      const firstPart = atIdx > 0 ? channelId.substring(0, atIdx) : channelId;
-      if (firstPart.startsWith("s")) {
-        const lastUnderscore = firstPart.lastIndexOf("_");
-        if (lastUnderscore > 0) {
-          return firstPart.substring(1, lastUnderscore);
-        }
-      }
-    }
-    return "";
+    return transportSpaceId(msg.channel_id);
   }
 
   private isBlockedBot(uid: string): boolean {
