@@ -29,14 +29,20 @@ const TYPING_INTERVAL_MS = 5_000;
 /** Maximum characters per message segment. */
 const MAX_SEGMENT_CHARS = 3_500;
 
-/** Accept opaque IDs or positive int64 text without numeric coercion. */
+/**
+ * Acknowledgement IDs must be canonical positive int64 text, an ASCII opaque
+ * name (letter/underscore first, then letters/digits/underscore/hyphen; ≤128
+ * characters), or a UUID. Do not trim or normalize evidence: numeric aliases,
+ * parser-recovered leading zeros, controls and malformed Unicode fail closed.
+ */
 function isUsableMessageId(id: unknown): id is string {
-  if (typeof id !== "string" || id.trim().length === 0) return false;
-  if (/^-?\d+$/.test(id)) {
-    const value = BigInt(id);
-    return value > 0n && value <= 9223372036854775807n;
+  if (typeof id !== "string" || id.length === 0 || id.length > 128) return false;
+  if (/^[1-9][0-9]{0,18}$/.test(id)) {
+    return BigInt(id) <= 9223372036854775807n;
   }
-  return true;
+  if (id === "NaN" || id === "Infinity") return false;
+  return /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(id)
+    || /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id);
 }
 
 // ─── Message Splitting ─────────────────────────────────────────────────────

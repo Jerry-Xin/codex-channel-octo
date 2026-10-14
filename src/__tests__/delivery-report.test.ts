@@ -96,13 +96,66 @@ describe("correlated delivery report", () => {
     assertAttempts(["Answer."]);
   });
   it("preserves opaque string identities without rewriting them", async () => {
-    reply = b => Response.json({ message_id: " opaque-message Ω ", client_msg_no: b.client_msg_no });
-    assertReport(await deliver("Answer."), 1, [" opaque-message Ω "]);
+    reply = b => Response.json({ message_id: "opaque-message_1", client_msg_no: b.client_msg_no });
+    assertReport(await deliver("Answer."), 1, ["opaque-message_1"]);
     assertAttempts(["Answer."]);
   });
   it("does not acknowledge duplicate transport identities for later segments", async () => {
     reply = b => Response.json({ message_id: "same-message", client_msg_no: b.client_msg_no });
     assertReport(await deliver(parts.join("")), 3, ["same-message"]);
+    assertAttempts(parts);
+  });
+
+  const unusableIds: unknown[] = [
+    "0", "-1", "+0", "+1", "01", "001", "0000000000000001", "01234567890123456789",
+    " 1", "1 ", "\t1", "1\n", " 0 ", " message-1", "message-1 ", "message id",
+    "1.0", "0.1", ".1", "1e0", "1E+3", "1e-3", "-0", "0x1", "1_000",
+    "9223372036854775808", "9999999999999999999999999999999999999999",
+    "", " ", "\0", "\u0001", "\u001f", "\u007f", "\u0080", "\u009f", "id\0tail",
+    "id\u0085tail", "\ud800", "\udc00", "id\ud800tail", "id\udc00tail", "message-Ω", "id😀",
+    "NaN", "Infinity", "-Infinity", "１２", "١", "id/part", "id.part", "id:part",
+    "a".repeat(129), null, {}, [], 1, 0, -1, true,
+    ...Array.from({ length: 32 }, (_, code) => `id${String.fromCharCode(code)}tail`),
+    ...Array.from({ length: 33 }, (_, code) => `id${String.fromCharCode(127 + code)}tail`),
+    "id\u2028tail", "id\u2029tail", "id\u200btail", "id\u202etail", "id\ufeff",
+    "\u00a01", "1\u00a0", "01e0", "1abc", "--1", "+", ".",
+  ];
+  it.each(unusableIds.map(id => [id]))("rejects noncanonical or unbounded string identity %j", async id => {
+    reply = b => Response.json({ message_id: id, client_msg_no: b.client_msg_no });
+    assertReport(await deliver(parts.join("")), 3, []);
+    assertAttempts(parts);
+  });
+  it.each(["1", "9223372036854775807", "message-1", "opaque_message-2", "a".repeat(128),
+    "00000000-0000-4000-8000-000000000001"])("preserves bounded canonical identity %s", async id => {
+    reply = b => Response.json({ message_id: id, client_msg_no: b.client_msg_no });
+    assertReport(await deliver("Answer."), 1, [id]);
+    assertAttempts(["Answer."]);
+  });
+  // Reviewer regressions: inherited int64 protection recovers these invalid
+  // JSON tokens as strings. They must never become acknowledgement evidence.
+  it.each(["0000000000000001", "01234567890123456789", "01", "001", "+0", "+1", "-1",
+    "0", "1.0", "1e0", "9223372036854775808"])("rejects raw numeric token %s", async rawId => {
+    reply = b => new Response(`{"message_id":${rawId},"client_msg_no":"${b.client_msg_no}"}`, { status: 200 });
+    assertReport(await deliver(parts.join("")), 3, []);
+    assertAttempts(parts);
+  });
+  it.each([["1", "01", "001"], ["01", "1", "001"], ["1", "1", "1"],
+    ["9223372036854775807", "09223372036854775807", "9223372036854775807"]])(
+    "rejects exact duplicates and numeric aliases across correlated sends %j/%j/%j", async (...ids) => {
+      reply = (b, i) => Response.json({ message_id: ids[i], client_msg_no: b.client_msg_no });
+      const expected = ids.includes("1") ? ["1"] : ["9223372036854775807"];
+      assertReport(await deliver(parts.join("")), 3, expected);
+      assertAttempts(parts);
+    });
+  it.each([undefined, null, 1, "", "other-request"])("keeps correlation mandatory for valid IDs (%j)", async correlation => {
+    reply = () => Response.json({ message_id: "1", client_msg_no: correlation });
+    assertReport(await deliver(parts.join("")), 3, []);
+    assertAttempts(parts);
+  });
+  it("orders confirmed IDs around a rejected numeric alias", async () => {
+    const ids = ["1", "01", "2"];
+    reply = (b, i) => Response.json({ message_id: ids[i], client_msg_no: b.client_msg_no });
+    assertReport(await deliver(parts.join("")), 3, ["1", "2"]);
     assertAttempts(parts);
   });
   it("keeps legitimate empty output separate from an acknowledged empty notice", async () => {
