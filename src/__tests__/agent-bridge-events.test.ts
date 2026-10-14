@@ -1,3 +1,4 @@
+import { OutputCollector, DEFAULT_OUTPUT_SELECTION_MODE } from '../output-selection.js';
 /**
  * agent-bridge typed-event tests (queryAgentEvents) — mocked @openai/codex-sdk.
  * Covers work identity / first-sight seq, message phase and revisions, attempt
@@ -148,10 +149,11 @@ describe('message events', () => {
       yield msg('item_1', 'b', { phase: 'commentary' });
       yield msg('item_2', 'c', { phase: 'final_answer' });
       yield msg('item_3', 'd', { phase: 'something_else' });
+      yield msg('item_4', 'e', { phase: 'partial_answer' });
       yield turnDone;
     }];
     const phases = (await events()).filter((e) => e.kind === 'message').map((e) => (e as { phase: string }).phase);
-    expect(phases).toEqual(['unknown', 'commentary', 'final_answer', 'unknown']);
+    expect(phases).toEqual(['unknown', 'commentary', 'final_answer', 'unknown', 'partial_answer']);
   });
 
   it('T2: a snapshot of the same item keeps its first-sight seq', async () => {
@@ -345,5 +347,20 @@ describe('T25: one canonical options contract', () => {
     expect(reportedPrompts[0]).toContain('fresh document context');
     expect(reportedPrompts[0]).not.toContain('\n\nhi');
     expect(cleared).toBe(1);
+  });
+});
+
+// The real bridge sees SDK-style id/type/text items with no phase property.
+describe('unlabeled SDK events through default output selection', () => {
+  it.each([false,true])('excludes progress (tool boundary=%s)',async withTool=>{
+    scriptedRuns=[async function*(){
+      yield started('thread');yield msg('progress','I will inspect the code.');
+      if(withTool) yield item('tool','command_execution','completed',{command:'true'});
+      yield msg('answer','The fix is complete.');yield turnDone;
+    }];
+    const collector=new OutputCollector();const observed=await events();
+    for(const event of observed) collector.push(event);
+    expect(observed.filter(e=>e.kind==='message').map(e=>e.phase)).toEqual(['unknown','unknown']);
+    expect(collector.select({mode:DEFAULT_OUTPUT_SELECTION_MODE,maxChars:1000})).toMatchObject({text:'The fix is complete.',source:'last_message',droppedMessageCount:1});
   });
 });

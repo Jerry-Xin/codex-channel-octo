@@ -154,11 +154,12 @@ describe('output selection wiring', () => {
 
   it('T13: delivery and history receive the same selected text in every mode', async () => {
     const expected = {
+      final: 'The answer is 42.',
       phase: 'Let me check.\n\nThe answer is 42.',
       heuristic: 'The answer is 42.',
       legacy: 'Let me check.The answer is 42.',
     } as const;
-    for (const mode of ['phase', 'heuristic', 'legacy'] as const) {
+    for (const mode of ['final', 'phase', 'heuristic', 'legacy'] as const) {
       vi.clearAllMocks();
       const config = makeConfig({}, { outputSelection: mode });
       setup(config);
@@ -172,12 +173,14 @@ describe('output selection wiring', () => {
     }
   });
 
-  it('default mode is phase (all unlabeled messages, delimited)', async () => {
+  it('default mode final filters unlabeled narration without a tool boundary', async () => {
     const config = makeConfig();
     setup(config);
     script([start(), m('a', 0, 'one'), m('b', 1, 'two'), end()]);
     await run(config);
-    expect(historyInputs()).toEqual(['one\n\ntwo']);
+    expect(historyInputs()).toEqual(['two']);
+    expect(sentContents()).toEqual(['two']);
+    expect(relayInputs()).toEqual(['two']);
   });
 
   it('T6: a throw after partial output → error notice, nothing delivered, nothing stored', async () => {
@@ -205,7 +208,7 @@ describe('output selection wiring', () => {
     setup(config);
     const warn = vi.spyOn(console, 'warn');
     const para = 'word '.repeat(700).trim(); // ~3.5k chars per paragraph
-    script([start(), m('a', 0, `${para}\n\n${para}`), m('b', 1, `${para}\n\n${para}`), end()]);
+    script([start(), m('a', 0, 'discarded narration'), m('b', 1, `${para}\n\n${para}\n\n${para}`), end()]);
     await run(config);
     const [input] = relayInputs();
     expect(input.length).toBeLessThanOrEqual(max);

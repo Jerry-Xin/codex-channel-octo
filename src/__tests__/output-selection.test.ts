@@ -93,7 +93,7 @@ describe('selection table', () => {
     expect(sel.messageIds).toEqual(['m2']);
   });
 
-  it('T1 (default phase mode on unlabeled messages): delivers all, delimited', () => {
+  it('T1 (explicit compatibility phase mode on unlabeled messages): delivers all, delimited', () => {
     const sel = s().start().msg('m0', 'Let me check.').work('w1').msg('m2', 'The answer is 42.').end().select();
     expect(sel.text).toBe('Let me check.\n\nThe answer is 42.');
     expect(sel.source).toBe('unclassified_all');

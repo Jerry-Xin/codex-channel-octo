@@ -299,7 +299,7 @@ export function isStreamInterruptError(err: unknown): boolean {
 }
 
 /** Output intent of an agent message, read defensively from the raw item. */
-export type MessagePhase = 'commentary' | 'final_answer' | 'unknown';
+export type MessagePhase = 'commentary' | 'partial_answer' | 'final_answer' | 'unknown';
 
 /**
  * Typed bridge output. Errors still propagate as thrown exceptions.
@@ -347,7 +347,7 @@ const NON_WORK_ITEM_TYPES = new Set(['agent_message', 'reasoning', 'todo_list', 
 
 function readPhase(item: ThreadItem): MessagePhase {
   const phase = (item as { phase?: unknown }).phase;
-  return phase === 'commentary' || phase === 'final_answer' ? phase : 'unknown';
+  return phase === 'commentary' || phase === 'partial_answer' || phase === 'final_answer' ? phase : 'unknown';
 }
 
 /**

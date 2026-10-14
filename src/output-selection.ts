@@ -15,10 +15,13 @@
  *    a fresh retry) are never eligible.
  *  - Selection pool `S` = `P` when `P` is non-empty, otherwise `L`. When `P` is
  *    non-empty the lineage contributes nothing to any rule.
- *  - Messages with empty text are ignored (the baseline never yielded them).
+ *  - Messages with empty text are ignored. Mode final also ignores whitespace-only
+ *    text when choosing the pool and candidates; compatibility modes do not.
  *
  * Selection table (top-down; the first non-empty result wins):
  *  - R1 `phase`: known `final_answer` messages of `S`.
+ *  - Mode final then keeps the last non-commentary item (or last commentary
+ *    fallback), recording last_message / last_message_partial. It stops here.
  *  - R2 `trailing` (mode `heuristic` only; requires `S = P` and a completed
  *    turn): non-commentary messages of `S` whose first-sight seq is greater than
  *    the first-sight seq of the last work item of `F`. Abandoned for R3 when a
@@ -34,7 +37,8 @@
  * R2 is a heuristic based on ordering only. It is NOT a final-output signal;
  * only R1 (a runtime `phase` field, absent in SDK/CLI 0.142.3) is.
  *
- * Mode `phase` (default) is the table without R2. Mode `legacy` bypasses the
+ * Mode `final` is the default with the explicit last-message fallback above.
+ * Mode `phase` (compatibility) is the table without R2. Mode `legacy` bypasses the
  * table and reproduces the baseline content: messages of `F` only, all phases,
  * first-seen order, joined with `''`. Every other mode joins with `\n\n`.
  *
@@ -51,14 +55,16 @@ export const TRUNCATION_SUFFIX = '\n\n[response truncated]';
 /** Default maximum response length (Q32). Shared with stream-relay. */
 export const DEFAULT_MAX_RESPONSE_CHARS = 524_288; // 512 KB
 
-export type OutputSelectionMode = 'phase' | 'heuristic' | 'legacy';
+export type OutputSelectionMode = 'final' | 'phase' | 'heuristic' | 'legacy';
 
-export const OUTPUT_SELECTION_MODES: readonly OutputSelectionMode[] = ['phase', 'heuristic', 'legacy'];
+export const OUTPUT_SELECTION_MODES: readonly OutputSelectionMode[] = ['final', 'phase', 'heuristic', 'legacy'];
 
-export const DEFAULT_OUTPUT_SELECTION_MODE: OutputSelectionMode = 'phase';
+export const DEFAULT_OUTPUT_SELECTION_MODE: OutputSelectionMode = 'final';
 
 export type SelectionSource =
   | 'phase'
+  | 'last_message'
+  | 'last_message_partial'
   | 'trailing'
   | 'unclassified_all'
   | 'commentary_last_resort'
@@ -216,8 +222,9 @@ export class OutputCollector {
       return this.finish(P, P.length > 0 ? 'legacy_all' : 'empty', 'primary', eligibleCount, opts.maxChars, '');
     }
 
-    const pool: 'primary' | 'lineage' = P.length > 0 ? 'primary' : 'lineage';
-    const S = pool === 'primary' ? P : L;
+    const pool: 'primary' | 'lineage' = P.some(m => opts.mode !== 'final' || m.text.trim().length > 0) ? 'primary' : 'lineage';
+    const eligible = pool === 'primary' ? P : L;
+    const S = opts.mode === 'final' ? eligible.filter(m => m.text.trim().length > 0) : eligible;
     const kFinal = S.filter((m) => m.phase === 'final_answer');
     const kComm = S.filter((m) => m.phase === 'commentary');
     const nonComm = S.filter((m) => m.phase !== 'commentary');
@@ -225,6 +232,16 @@ export class OutputCollector {
     // R1: proven final output.
     if (kFinal.length > 0) {
       return this.finish(kFinal, 'phase', pool, eligibleCount, opts.maxChars, JOIN);
+    }
+
+    // Exec JSONL 0.142/0.162 omits phase. This is an explicit ordering
+    // fallback, not inferred provider intent. Preserve explicit multipart finals
+    // above; never concatenate all unlabeled progress in the default mode.
+    if (opts.mode === 'final') {
+      const last = (nonComm.length ? nonComm : kComm).at(-1);
+      const source = !last ? 'empty' : pool === 'lineage' || F.terminal !== 'completed'
+        ? 'last_message_partial' : 'last_message';
+      return this.finish(last ? [last] : [], source, pool, eligibleCount, opts.maxChars, JOIN);
     }
 
     // R2: trailing-run heuristic (opt-in).

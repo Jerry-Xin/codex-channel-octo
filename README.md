@@ -105,9 +105,20 @@ so the two always match. `sdk.outputSelection` controls the choice:
 
 | Value | Behavior |
 |---|---|
-| `phase` (default) | Uses the runtime's final-answer label when present. Otherwise every message is delivered, separated by a blank line. **Codex SDK/CLI 0.142.3 labels no messages, so in this mode intermediate narration is still delivered.** |
+| `final` (default) | Keeps all explicitly labeled final parts. Without final metadata, keeps only the last non-empty non-commentary item; commentary-only output uses the last commentary item. This is an ordering fallback, not inferred final intent. |
+| `phase` (compatibility) | Uses the runtime's final-answer label when present. Otherwise all non-commentary messages are delivered, separated by a blank line; commentary-only output retains those messages. **Codex SDK/CLI 0.142.3 labels no messages, so in this mode intermediate narration is still delivered.** |
 | `heuristic` (opt-in) | Keeps only the messages after the turn's last tool call / command / file change. It falls back to all messages when the turn did not complete, or when that would drop a long earlier message. This is an ordering heuristic, not a final-answer signal. |
 | `legacy` (rollback) | Previous behavior: all messages of the final run, concatenated with no separator. |
+
+**Default change:** an unset `sdk.outputSelection` now selects `final`. Explicit
+`phase`, `heuristic` and `legacy` configurations retain their prior behavior.
+Codex exec JSONL 0.142.3/0.162.1 omits phase metadata, so the default normally
+logs `source=last_message`. Unlabeled multipart answers may lose earlier parts;
+use explicit `phase` if retaining all unlabeled parts is required. Explicit
+multipart finals are preserved. Snapshot updates replace the same item without
+changing first-seen order. Empty/whitespace items cannot erase useful output.
+An inherited or non-terminal last-message fallback logs `last_message_partial`;
+it is not proof that the task completed. See [the source investigation](docs/final-output-policy.md).
 
 When a stream interruption is recovered and the recovery run produces no
 message, the interrupted run's messages are used instead. These may be

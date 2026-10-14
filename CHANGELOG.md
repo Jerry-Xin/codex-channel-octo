@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Default to explicit-final-or-last-message reply selection for Codex exec JSONL
+  runtimes that omit phase, avoiding end-of-turn aggregation of progress text.
+  Preserve explicit compatibility modes and multipart labeled finals; distinguish
+  partial fallbacks and recognize internal partial_answer metadata defensively.
+
+
 - Keep Octo recovery alive after failed token refreshes and cooldown-suppressed
   requests, independently of successful REST heartbeats. Coalesce retry timers,
   ignore retired-socket callbacks and cancel/abort recovery on shutdown.
