@@ -1,3 +1,4 @@
+import { TurnFailure } from '../agent-failure.js';
 /**
  * agent-bridge typed-event tests (queryAgentEvents) — mocked @openai/codex-sdk.
  * Covers work identity / first-sight seq, message phase and revisions, attempt
@@ -183,69 +184,15 @@ describe('attempt markers', () => {
     expect(evs.at(-1)).toEqual({ kind: 'attempt_end', attempt: 0, terminal: 'no_terminal' });
   });
 
-  it('T7: stream interrupt → recovery attempt continues the interrupted one; seq stays monotonic', async () => {
-    scriptedRuns = [
-      async function* () {
-        yield started('t1');
-        yield msg('item_0', 'lost');
-        throw new Error(interrupt);
-      },
-      async function* () {
-        yield started('t1');
-        yield msg('item_0', 'kept');
-        yield turnDone;
-      },
-    ];
-    const evs = await events();
-    expect(evs).toEqual([
-      { kind: 'attempt_start', attempt: 0, reason: 'initial', continues: null },
-      { kind: 'message', attempt: 0, itemId: 'item_0', seq: 0, text: 'lost', phase: 'unknown' },
-      { kind: 'attempt_start', attempt: 1, reason: 'stream_recovery', continues: 0 },
-      { kind: 'message', attempt: 1, itemId: 'item_0', seq: 1, text: 'kept', phase: 'unknown' },
-      { kind: 'attempt_end', attempt: 1, terminal: 'completed' },
-    ]);
-  });
+  it.each([{message:interrupt,resume:undefined,partial:false},{message:staleErr,resume:'old',partial:false},{message:interrupt,resume:'old',partial:true},{message:staleErr,resume:'old',partial:true}])('has no recovery attempt/end after $message (partial=$partial)',async({message,resume,partial})=>{
+ const reset=vi.fn();scriptedRuns=[async function*(){yield started('t');if(partial)yield msg('before','partial');throw new Error(message);}];const seen:AgentOutputEvent[]=[];
+ await expect((async()=>{for await(const e of queryAgentEvents('hi',cfg(),undefined,undefined,{resume,onResumeFailed:reset}))seen.push(e);})()).rejects.toMatchObject({report:{attempts:1,decision:'blocked_uncertain'}});
+ expect(seen.map(e=>e.kind)).toEqual(partial?['attempt_start','message']:['attempt_start']);expect(runIdx).toBe(1);expect(reset).not.toHaveBeenCalled();
+ });
 
-  it('T8: stale resume → fresh_retry with continues null (stale attempt not in lineage)', async () => {
-    scriptedRuns = [
-      async function* () {
-        yield msg('item_0', 'stale text');
-        throw new Error(staleErr);
-      },
-      async function* () {
-        yield started('t2');
-        yield msg('item_0', 'fresh');
-        yield turnDone;
-      },
-    ];
-    const evs = await events({ resume: 'old', fallbackRetryPrompt: 'with history', onResumeFailed: () => {} });
-    expect(evs.filter((e) => e.kind === 'attempt_start')).toEqual([
-      { kind: 'attempt_start', attempt: 0, reason: 'initial', continues: null },
-      { kind: 'attempt_start', attempt: 1, reason: 'fresh_retry', continues: null },
-    ]);
-  });
 
-  it('T7d: stale → fresh retry → stream recovery continues the fresh attempt', async () => {
-    scriptedRuns = [
-      async function* () {
-        throw new Error(staleErr);
-      },
-      async function* () {
-        yield started('t2');
-        throw new Error(interrupt);
-      },
-      async function* () {
-        yield started('t2');
-        yield turnDone;
-      },
-    ];
-    const evs = await events({ resume: 'old', onResumeFailed: () => {} });
-    expect(evs.filter((e) => e.kind === 'attempt_start')).toEqual([
-      { kind: 'attempt_start', attempt: 0, reason: 'initial', continues: null },
-      { kind: 'attempt_start', attempt: 1, reason: 'fresh_retry', continues: null },
-      { kind: 'attempt_start', attempt: 2, reason: 'stream_recovery', continues: 1 },
-    ]);
-  });
+
+
 
   it('T6: an error after partial output propagates (no attempt_end)', async () => {
     scriptedRuns = [async function* () {
@@ -256,36 +203,16 @@ describe('attempt markers', () => {
     const seen: AgentOutputEvent[] = [];
     await expect((async () => {
       for await (const ev of queryAgentEvents('hi', cfg())) seen.push(ev);
-    })()).rejects.toThrow('boom');
+    })()).rejects.toBeInstanceOf(TurnFailure);
     expect(seen.some((e) => e.kind === 'attempt_end')).toBe(false);
   });
 
-  it('a message observed mid-run does not block a stale-resume fresh retry (baseline gating)', async () => {
-    scriptedRuns = [
-      async function* () {
-        yield msg('item_0', 'early');
-        throw new Error(staleErr);
-      },
-      async function* () {
-        yield started('t2');
-        yield msg('item_0', 'fresh');
-        yield turnDone;
-      },
-    ];
-    const out: string[] = [];
-    for await (const t of queryAgent('hi', cfg(), undefined, undefined, { resume: 'old', onResumeFailed: () => {} })) out.push(t);
-    expect(out).toEqual(['fresh']);
-  });
+
 });
 
 describe('T14: queryAgent wrapper keeps baseline string output', () => {
   it('yields only the completed run, first-seen order, non-empty, snapshot-overwritten', async () => {
     scriptedRuns = [
-      async function* () {
-        yield started('t1');
-        yield msg('item_0', 'lost');
-        throw new Error(interrupt);
-      },
       async function* () {
         yield started('t1');
         yield msg('item_0', 'a1', {}, 'updated');
@@ -318,32 +245,8 @@ describe('T25: one canonical options contract', () => {
     }>();
   });
 
-  it('options flow through the wrapper (onSessionId, onResumeFailed)', async () => {
-    scriptedRuns = [
-      async function* () {
-        throw new Error(staleErr);
-      },
-      async function* () {
-        yield started('t-new');
-        yield msg('item_0', 'ok');
-        yield turnDone;
-      },
-    ];
-    const ids: string[] = [];
-    const reportedPrompts: string[] = [];
-    let cleared = 0;
-    const out: string[] = [];
-    for await (const t of queryAgent('hi', cfg(), undefined, undefined, {
-      resume: 'old',
-      fallbackRetryPrompt: 'fresh document context',
-      onSessionId: (id, prompt) => { ids.push(id); reportedPrompts.push(prompt); },
-      onResumeFailed: () => cleared++,
-    })) out.push(t);
-    expect(out).toEqual(['ok']);
-    expect(ids).toEqual(['t-new']);
-    expect(reportedPrompts).toHaveLength(1);
-    expect(reportedPrompts[0]).toContain('fresh document context');
-    expect(reportedPrompts[0]).not.toContain('\n\nhi');
-    expect(cleared).toBe(1);
-  });
+  it('onSessionId observes the current attempt; unsafe reset callback is never used',async()=>{
+ const session=vi.fn(),reset=vi.fn();scriptedRuns=[async function*(){yield started('t');yield turnDone;}];
+ await events({resume:'t',onSessionId:session,onResumeFailed:reset});expect(session).toHaveBeenCalledWith('t',expect.stringContaining('hi'));expect(reset).not.toHaveBeenCalled();
+ });
 });

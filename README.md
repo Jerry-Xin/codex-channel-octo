@@ -201,3 +201,7 @@ npm run type-check  # tsc --noEmit
 ## License
 
 Apache-2.0
+
+### Safe failure handling and recovery
+
+Failures now carry a safe diagnostic ID and category. Timeouts cancel the turn and quarantine its session; a missing tool event is not proof that nothing executed. Optional `sdk.recovery` retries are disabled by default and currently limited to proven pre-execution temporary failures. Delivery/storage errors never replay the model task. See [recovery configuration, delivery behavior and offline reconciliation](docs/issue-26-safe-recovery.md).

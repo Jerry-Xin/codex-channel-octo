@@ -2,6 +2,8 @@
  * Session Router — routing + concurrency control + mention gate + rate limiting.
  */
 
+import { diagnosticId } from './agent-failure.js';
+import { TurnContext, type TurnLedger } from './turn-context.js';
 import type { Config } from './config.js';
 import type { BotMessage, MentionEntity } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
@@ -33,7 +35,7 @@ export interface RouteResult {
    * so the type doesn't suggest a wider contract than the code provides.
    * Add more reasons here when corresponding emit sites land.
    */
-  rejectionReason?: 'rate_limited' | 'oversized';
+  rejectionReason?: 'rate_limited' | 'oversized' | 'quarantined';
 }
 
 interface TokenBucket {
@@ -67,9 +69,16 @@ export class SessionRouter {
    */
   private readonly knownBotUids = new Set<string>();
   private readonly mentionPreferences: MentionPreferences;
+  private readonly executions = new Set<Promise<void>>();
+  private readonly turns = new Map<TurnContext, string>();
+  private stopping = false;
+  private readonly quarantineNotices = new Map<string, number>();
+  private readonly quarantined = new Set<string>();
+  private readonly ledger?: TurnLedger;
   private readonly conversationMarkdown: ConversationMarkdown;
 
   constructor(config: Config, robotId: string, ownerUid: string | (() => string) = '', documentStore?: import('./conversation-md.js').ConversationDocumentStore) {
+    if (documentStore && 'beginTurn' in documentStore) this.ledger = documentStore as typeof documentStore & TurnLedger;
     this.config = config;
     this.robotId = robotId;
     this.ownerUid = ownerUid;
@@ -151,11 +160,21 @@ export class SessionRouter {
    */
   async routeAndHandle(
     msg: BotMessage,
-    handler: (result: RouteResult) => Promise<void>,
+    handler: (result: RouteResult, turn: TurnContext) => Promise<void>,
   ): Promise<RouteResult | null> {
     const key = this.sessionKey(msg);
     return this.withSessionLock(key, async () => {
+      if (this.stopping) return null;
+      if (this.quarantined.has(key) || this.ledger?.isTurnQuarantined(key)) {
+        const lastNotice = this.quarantineNotices.get(key);
+        if (lastNotice === undefined || Date.now() - lastNotice >= 60_000) {
+          this.quarantineNotices.set(key, Date.now());
+          await this.replySafe(msg, '⚠️ 上次任务的执行状态尚未确认，本会话已暂停新任务，请先核对结果。');
+        }
+        return { sessionKey:key, shouldProcess:false, message:msg, rejectionReason:'quarantined' };
+      }
       const result = await this.processMessage(msg, key);
+      if (this.stopping) return { sessionKey:key, shouldProcess:false, message:msg, rejectionReason:'quarantined' };
       if (result && result.shouldProcess) {
         await this.runHandlerWithTimeout(result, handler);
       }
@@ -163,70 +182,59 @@ export class SessionRouter {
     });
   }
 
-  /**
-   * #141: Run the handler under a dispatch timeout so a hung turn (a stuck SDK
-   * query, a wedged tool subprocess, a stalled stream) cannot block the session
-   * forever. The handler runs inside withSessionLock — if it never returns, the
-   * lock's gate never resolves and EVERY subsequent message for this session is
-   * stuck permanently (silent). Racing the handler against a timeout guarantees
-   * the lock releases.
-   *
-   * Scope (mirrors openclaw #75): we do NOT cancel the in-flight turn — the SDK
-   * query keeps running to completion in the background; we only unblock the
-   * queue. Worst case is a delayed real reply arriving after the apology.
-   *
-   * `timeoutError` is a per-invocation Error so the catch identifies OUR timeout
-   * by reference equality, never by string comparison (a same-text upstream
-   * error must not be misclassified).
-   */
-  private async runHandlerWithTimeout(
-    result: RouteResult,
-    handler: (result: RouteResult) => Promise<void>,
-  ): Promise<void> {
-    const timeoutMs = this.config.dispatchTimeoutMs;
-    if (!timeoutMs || timeoutMs <= 0) {
-      // Timeout disabled — run unguarded.
-      await handler(result);
-      return;
+  /** Shutdown tracks real handler completion, even after the queue gate settles. */
+  async stopTurns(graceMs = 5000): Promise<void> {
+    this.stopping = true;
+    for (const [turn, session] of this.turns) {
+      turn.cancel(); this.quarantined.add(session);
+      this.ledger?.finishTurn(session, turn.turnId, 'quarantined');
     }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([Promise.allSettled([...this.executions]), new Promise<void>(resolve => { timer = setTimeout(resolve, graceMs); })]);
+    if (timer) clearTimeout(timer);
+  }
 
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    const timeoutError = new Error(`dispatch timed out after ${timeoutMs}ms`);
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutHandle = setTimeout(() => reject(timeoutError), timeoutMs);
-    });
-
-    // The handler keeps running after a timeout (we don't cancel the in-flight
-    // turn — see scope note above). Once the race settles on timeoutError, that
-    // orphaned promise is no longer awaited; attach a no-op catch so a late
-    // rejection from a handler that doesn't self-contain its errors can't surface
-    // as an unhandledRejection. Today's caller (index.ts) is fully try/caught, so
-    // this is defense-in-depth for future callers.
-    const handlerPromise = handler(result);
-    handlerPromise.catch(() => { /* swallow late rejection after timeout */ });
-
-    try {
-      await Promise.race([handlerPromise, timeoutPromise]);
-    } catch (err) {
-      if (err === timeoutError) {
-        console.warn(
-          `session-router: dispatch hung past ${timeoutMs}ms, releasing session lock (session=${result.sessionKey})`,
-        );
-        // Bounded apology — replySafe swallows its own errors, and the
-        // underlying sendMessage in octo/api.ts is itself time-bounded, so a
-        // sick Octo API can't re-hang us here.
-        await this.replySafe(result.message, '⚠️ 处理超时，请稍后重试。');
-        return; // swallow: the lock releases, the queue advances
+  private async runHandlerWithTimeout(result: RouteResult, handler: (result: RouteResult, turn: TurnContext) => Promise<void>): Promise<void> {
+    const id = diagnosticId();
+    const generation = this.ledger?.beginTurn(result.sessionKey, id) ?? 1;
+    const turn = new TurnContext(this.config.dispatchTimeoutMs, generation, id);
+    this.turns.set(turn, result.sessionKey);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    // The timeout path remains quarantined even if a cancelled promise settles:
+    // subprocess/remote-effect termination cannot be proven by promise completion.
+    const task = Promise.resolve().then(() => handler(result, turn));
+    this.executions.add(task);
+    const settled = task.then(() => {}, err => {
+      if (!turn.signal.aborted) console.error('session-router: handler error', summarizeAgentError(err));
+    }).finally(() => {
+      this.executions.delete(task); this.turns.delete(turn);
+      turn.revoke();
+      if (!turn.signal.aborted) {
+        if (turn.needsReconciliation) this.quarantined.add(result.sessionKey);
+        this.ledger?.finishTurn(result.sessionKey, turn.turnId, turn.needsReconciliation ? 'quarantined' : 'clean');
       }
-      // A real handler error — index.ts's handler already catches and replies
-      // internally, so reaching here is unexpected. Swallow to keep the lock
-      // release path identical (never let an error wedge the queue).
-      console.error(
-        `session-router: handler error (session=${result.sessionKey}): ${summarizeAgentError(err)}`,
-      );
-    } finally {
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-    }
+    });
+    let onAbort!: () => void;
+    const cancelled = new Promise<void>(resolve => {
+      onAbort = resolve; turn.signal.addEventListener('abort', onAbort, { once:true });
+    });
+    try {
+      const waits: Promise<void>[] = [settled, cancelled];
+      if (this.config.dispatchTimeoutMs > 0) waits.push(new Promise<void>(resolve => {
+        timeout = setTimeout(() => { timedOut = true; turn.cancel(); resolve(); }, this.config.dispatchTimeoutMs);
+      }));
+      await Promise.race(waits);
+      if (timedOut && !this.stopping) {
+        this.quarantined.add(result.sessionKey);
+        this.ledger?.finishTurn(result.sessionKey, turn.turnId, 'quarantined');
+        await this.replySafe(result.message, `⚠️ 任务超时，已请求停止执行；本会话暂停新任务，等待核对。编号 ${turn.turnId}`);
+      } else if (turn.signal.aborted && !this.stopping) {
+        this.quarantined.add(result.sessionKey);
+        this.ledger?.finishTurn(result.sessionKey, turn.turnId, 'quarantined');
+        await this.replySafe(result.message, `⚠️ 任务已取消或超时；执行状态待核对，本会话暂停新任务。编号 ${turn.turnId}`);
+      }
+    } finally { if (timeout) clearTimeout(timeout); turn.signal.removeEventListener('abort',onAbort); }
   }
 
   async route(msg: BotMessage): Promise<RouteResult | null> {

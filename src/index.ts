@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { sendMessage as sendTurnMessage } from './octo/api.js';
+import { AgentFailure, TurnFailure, classifyFailure, failureReply, type FailureStage } from './agent-failure.js';
 /**
  * codex-channel-octo — Entry point.
  * Bridge OpenAI Codex (via @openai/codex-sdk) to Octo IM.
@@ -15,7 +17,7 @@ import { SessionStore } from './session-store.js';
 import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
-import { queryAgentEvents, isStreamInterruptError } from './agent-bridge.js';
+import { queryAgentEvents } from './agent-bridge.js';
 import type { QueryAgentOptions } from './agent-bridge.js';
 import {
   OutputCollector,
@@ -31,7 +33,7 @@ import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody } from '.
 import type { SessionCtx } from './cwd-resolver.js';
 import { cleanupExpiredCwds, resolveSessionCwd } from './cwd-resolver.js';
 import { StreamRelay } from './stream-relay.js';
-import { sendMessage, sendReadReceipt, getChannelMessages, getUploadCredentials } from './octo/api.js';
+import { sendReadReceipt, getChannelMessages, getUploadCredentials } from './octo/api.js';
 import type { HistoricalMessage } from './octo/api.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import type { BotMessage } from './octo/types.js';
@@ -225,6 +227,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     // Phase 1: register over REST (gets botId) — does NOT open the socket yet, so
     // no message can arrive before the handler below is installed.
     await gateway.register();
+    store.recoverInterruptedTurns();
     console.log(`[codex-channel-octo] ${label}Bot registered: id=${gateway.botId}`);
 
     // #86: prefetch the media CDN host (best-effort). Octo serves media from a
@@ -286,6 +289,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
 
     const shutdown = async (): Promise<void> => {
       clearInterval(cwdCleanupTimer);
+      await router.stopTurns();
       await gateway.stop(activeHandlers);
       store.close();
     };
@@ -332,13 +336,21 @@ export async function handleMessage(
   // For non-processed messages, routeAndHandle returns without calling handler.
   // We still need to cache group text messages for context.
   let wasProcessed = false;
-  const routeResult = await router.routeAndHandle(msg, async (result) => {
+  const routeResult = await router.routeAndHandle(msg, async (result, turn) => {
     wasProcessed = true;
+    const turnStore = turn.guard(store);
+    const turnGroupContext = turn.guard(groupContext);
+    const sendMessage = (params: Parameters<typeof import('./octo/api.js').sendMessage>[0]) => {
+      turn.assertPublishable();
+      return sendTurnMessage({ ...params, signal: AbortSignal.any([turn.signal, AbortSignal.timeout(30_000)]) });
+    };
+    let stage: FailureStage = 'prepare';
+    let modelAttempts = 0;
     const { sessionKey } = result;
 
     try {
       // --- Session ---
-      store.getOrCreate(sessionKey, channelId, channelType);
+      turnStore.getOrCreate(sessionKey, channelId, channelType);
 
       // Session routing context (cwd/memory partition). Built here (before media
       // resolution) so inbound images can be downloaded INTO this session's cwd
@@ -394,9 +406,9 @@ export async function handleMessage(
       // session, so re-showing them would be redundant and would bloat the session.
       let groupContextBlock = '';
       if (isGroup) {
-        await groupContext.refreshMembers(channelId, config.apiUrl, config.botToken);
-        const cursor = groupContext.getContextCursor(channelId);
-        const delta = groupContext.buildContextSince(channelId, cursor);
+        await turnGroupContext.refreshMembers(channelId, config.apiUrl, config.botToken, turn);
+        const cursor = turnGroupContext.getContextCursor(channelId);
+        const delta = turnGroupContext.buildContextSince(channelId, cursor);
         if (delta.text) {
           // Untrusted chat (`<name>：<body>`): escape role labels + section markers
           // before it enters the user message (same neutralization the old system
@@ -407,7 +419,7 @@ export async function handleMessage(
         // the group-context block this turn.
         const contextSummary = renderMessageForContext(msg, config.apiUrl);
         if (contextSummary) {
-          groupContext.pushMessage(
+          turnGroupContext.pushMessage(
             channelId,
             msg.from_uid,
             msg.from_name ?? msg.from_uid,
@@ -422,7 +434,7 @@ export async function handleMessage(
         // duplicate-into-prompt + session bloat). Always advance, even when there
         // was no delta, so the current message is consumed. getMaxMessageId
         // reflects the just-pushed row; the cursor is monotonic.
-        groupContext.setContextCursor(channelId, groupContext.getMaxMessageId(channelId));
+        turnGroupContext.setContextCursor(channelId, turnGroupContext.getMaxMessageId(channelId));
       }
 
       // --- G1: Resolve the inbound payload into LLM-friendly text ---
@@ -528,7 +540,7 @@ export async function handleMessage(
       //
       // P1.1 (Stage 6): RichText payload.content is an Array<RichTextBlock>,
       // not a string. The previous `?? historyRecord` fallback only fired on
-      // null/undefined, so an array would pass through to store.appendUser()
+      // null/undefined, so an array would pass through to turnStore.appendUser()
       // and SQLite would reject the non-string binding at runtime, crashing
       // every RichText turn. Same risk for File payloads that ship a content
       // field instead of using mediaUrl. Defense: only trust payload.content
@@ -575,7 +587,7 @@ export async function handleMessage(
           );
         }
       }
-      // Note: quotePrefix is added to LLM input only — store.appendUser below
+      // Note: quotePrefix is added to LLM input only — turnStore.appendUser below
       // persists the raw user content without the quote prefix to avoid prefix
       // duplication on conversation replay.
       //
@@ -590,7 +602,7 @@ export async function handleMessage(
       // store, so key it by botId+sessionKey — otherwise bot A marking a session
       // backfilled would make bot B skip backfill against its own empty DB.
       const backfillKey = `${botId}\u0000${sessionKey}`;
-      let historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
+      let historyPrefix = turnStore.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
       if (
         isGroup &&
         !historyPrefix &&
@@ -617,16 +629,16 @@ export async function handleMessage(
             //
             // v0.3 /reset barrier: skip any historical message at or before the
             // reset point so a cleared conversation is not resurrected here.
-            const resetBarrier = store.getResetBarrier(sessionKey);
-            seedHistoryFromApi(store, sessionKey, apiMessages, botId, resetBarrier);
-            historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
+            const resetBarrier = turnStore.getResetBarrier(sessionKey);
+            seedHistoryFromApi(turnStore, sessionKey, apiMessages, botId, resetBarrier);
+            historyPrefix = turnStore.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
           }
         } catch (err) {
           console.error(`[codex-channel-octo] G4 backfill failed for ${sessionKey}: ${String(err)}`);
         }
       }
 
-      store.appendUser(sessionKey, userContent, msg.message_seq, msg.from_name ?? msg.from_uid);
+      turnStore.appendUser(sessionKey, userContent, msg.message_seq, msg.from_name ?? msg.from_uid);
 
       // --- Session resume + first-turn history injection ---
       // The SDK session is the source of truth for conversation history: on every
@@ -637,7 +649,7 @@ export async function handleMessage(
       // has continuity. Migration (existing deployments with SQLite history but no
       // SDK session id) is the same code path. After this turn, onSessionId
       // persists the id and later turns inject nothing.
-      const resume = store.getSdkSessionId(sessionKey);
+      const resume = turnStore.getSdkSessionId(sessionKey);
       const isFirstTurn = !resume;
       // The history block: prior conversation rendered for one-time injection.
       // historyPrefix is already per-line escaped by renderTurn; only section
@@ -709,6 +721,7 @@ export async function handleMessage(
         let noticeCount = 0;
         const MAX_TOOL_NOTICES = 10;
         onToolUse = (toolName: string, toolInput?: unknown): void => {
+          turn.assertPublishable();
           const params = formatToolParams(toolInput);
           const label = params ? `${toolName}(${params})` : toolName;
           if (label === lastNotice) return; // collapse exact repeats
@@ -728,20 +741,23 @@ export async function handleMessage(
         };
       }
 
-      // Always resume the SDK session for this sessionKey: the SDK session owns
+      // Resume the SDK session for this sessionKey: the SDK session owns
       // the conversation history (across turns and, for groups, across speakers —
       // the speaker is encoded in each turn so attribution survives). `resume` was
       // looked up above; `onSessionId` persists the (possibly new) id for next
       // turn. A first turn has resume===undefined → the SDK starts a fresh session
       // and reports its id here. If a stored id is stale/expired the SDK throws;
-      // queryAgent recovers by calling onResumeFailed (clear the bad id) and
-      // retrying once with the pre-assembled fallbackRetryPrompt so the
-      // conversation isn't lost (and assembly happens exactly once — see above).
+      // An unproven stale-thread failure now fails closed; no automatic fresh
+      // replay or mapping deletion is allowed based on missing tool events.
       let sessionOpts: QueryAgentOptions | undefined = {
+        signal: turn.signal, deadline: turn.deadline, diagnosticId: turn.turnId,
+        assertPublishable: () => turn.assertPublishable(),
+        onExecutionRisk: risk => { turn.executionRisk = risk; },
         senderContext: buildSenderContext(msg, router.getOwnerUid()),
         ...(resume ? { resume } : {}),
         onSessionId: (id: string, prompt: string) => {
-          store.setSdkSessionId(sessionKey, id);
+          turn.assertPublishable();
+          turnStore.setSdkSessionId(sessionKey, id);
           if (serverMd && ((serverMd.context && prompt.includes(serverMd.context))
             || (serverMd.retryContext && prompt.includes(serverMd.retryContext)))) {
             serverMd.commit(id);
@@ -749,7 +765,7 @@ export async function handleMessage(
         },
         ...(resume
           ? {
-              onResumeFailed: () => store.clearSdkSessionId(sessionKey),
+              onResumeFailed: () => { turn.assertPublishable(); turnStore.clearSdkSessionId(sessionKey); },
               fallbackRetryPrompt,
             }
           : {}),
@@ -765,6 +781,7 @@ export async function handleMessage(
         }
       }
 
+      stage = 'inference';
       const agentEvents = queryAgentEvents(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);
 
       // Select ONE reply for both delivery and history. The relay drains the
@@ -775,10 +792,21 @@ export async function handleMessage(
       let selected: SelectedOutput | undefined;
       async function* selectedChunks(): AsyncIterable<string> {
         const collector = new OutputCollector();
-        for await (const ev of agentEvents) collector.push(ev);
+        for await (const ev of agentEvents) {
+          turn.assertPublishable();
+          if (ev.kind === 'attempt_start') { modelAttempts++; turn.executionRisk = 'unknown'; }
+          if (ev.kind === 'work' && ['command_execution','file_change','mcp_tool_call'].includes(ev.itemType)) turn.executionRisk = 'effects_observed';
+          collector.push(ev);
+        }
         selected = collector.select({ mode: outputMode, maxChars: config.maxResponseChars ?? DEFAULT_MAX_RESPONSE_CHARS });
         console.log(describeSelection(selected, outputMode, collector.attemptCount));
-        if (selected.text) yield selected.text;
+        if (selected.text) {
+          turn.assertPublishable();
+          stage = 'history_commit';
+          turnStore.saveTurnOutput(turn.turnId, sessionKey, selected.text, msg.message_seq, botId);
+          stage = 'delivery';
+          yield selected.text;
+        }
       }
 
       // --- Stream output to Octo ---
@@ -788,12 +816,13 @@ export async function handleMessage(
       // list is kept authoritative by refreshMembers (prunes departed members),
       // best-effort fresh (1h refresh throttle). DMs have no member list and no
       // @ semantics, so both args stay undefined (skip).
-      const outboundNameToUid = isGroup ? groupContext.getNameToUidMap(channelId) : undefined;
+      const outboundNameToUid = isGroup ? turnGroupContext.getNameToUidMap(channelId) : undefined;
       const isValidMentionUid = isGroup
-        ? (uid: string): boolean => groupContext.isMember(channelId, uid)
+        ? (uid: string): boolean => turnGroupContext.isMember(channelId, uid)
         : undefined;
-      await streamRelay.deliver(channelId, channelType, selectedChunks(), config.apiUrl, config.botToken, config.maxResponseChars, outboundNameToUid, isValidMentionUid);
+      await streamRelay.deliver(channelId, channelType, selectedChunks(), config.apiUrl, config.botToken, config.maxResponseChars, outboundNameToUid, isValidMentionUid, { turn, store: turnStore });
 
+      turn.assertPublishable();
       // G8: Send read receipt after processing (fire-and-forget)
       if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
         sendReadReceipt({
@@ -809,14 +838,16 @@ export async function handleMessage(
       // Same bytes the relay received (mention rendering is delivery-only).
       const fullResponse = selected?.text ?? '';
       if (fullResponse) {
-        store.appendAssistant(sessionKey, fullResponse, msg.message_seq, botId);
+        stage = 'history_commit';
+        turn.assertPublishable();
+        turnStore.commitTurnOutput(turn.turnId);
         // G10: mark this message_seq as the last one we replied to. Next turn's
         // segmented history will treat messages with seq <= this as [answered].
         // #115: a synthetic cron fire carries message_seq=0 (no real wire seq);
         // setting the cursor to 0 would reset it and mis-segment real history as
         // all-[new]. Only advance the cursor for a real positive seq.
         if (typeof msg.message_seq === 'number' && msg.message_seq > 0) {
-          store.setLastBotReplySeq(sessionKey, msg.message_seq);
+          turnStore.setLastBotReplySeq(sessionKey, msg.message_seq);
         }
       } else {
         // Agent produced no output — send a feedback message so user isn't left hanging
@@ -830,13 +861,16 @@ export async function handleMessage(
       }
 
     } catch (err) {
-      console.error(`[codex-channel-octo] Error processing message (session=${result.sessionKey}):`, summarizeAgentError(err));
-      // Best-effort error reply. A stream interrupt that even one-shot resume
-      // recovery couldn't save gets an informative message (upstream returned
-      // an incomplete stream); everything else keeps the generic wording.
-      const content = isStreamInterruptError(err)
-        ? '模型响应流或本地传输解析失败，自动恢复未成功，请稍后重发。'
-        : 'An error occurred while processing your message. Please try again.';
+      if (turn.signal.aborted) return; // Router owns timeout/shutdown feedback.
+      turn.assertPublishable();
+      const failure = err instanceof TurnFailure ? err.report : {
+        diagnosticId: turn.turnId, attempts: modelAttempts,
+        decision: 'not_attempted' as const, executionRisk: turn.executionRisk,
+        first: { ...classifyFailure(err), stage: err instanceof AgentFailure ? err.snapshot.stage : stage }, final: { ...classifyFailure(err), stage: err instanceof AgentFailure ? err.snapshot.stage : stage },
+      };
+      if (failure.executionRisk !== 'proven_not_started' && ['inference','jsonl_parse','process_exit'].includes(failure.final.stage)) turn.needsReconciliation = true;
+      console.error('[codex-channel-octo] turn failed', JSON.stringify(failure));
+      const content = failureReply(failure);
       try {
         await sendMessage({
           apiUrl: config.apiUrl,
@@ -861,7 +895,7 @@ export async function handleMessage(
   // next legitimate turn — the rate limit reply went out but the content
   // still landed in [Group context]. Ordinary unmentioned chatter still
   // caches, but control events must never become conversation context.
-  const SUPPRESS_GROUP_CACHE = new Set(['rate_limited', 'oversized']);
+  const SUPPRESS_GROUP_CACHE = new Set(['rate_limited', 'oversized', 'quarantined']);
   const suppressGroupCache =
     !!routeResult?.rejectionReason && SUPPRESS_GROUP_CACHE.has(routeResult.rejectionReason);
 

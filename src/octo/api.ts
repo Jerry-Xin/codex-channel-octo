@@ -1,3 +1,5 @@
+import { AgentFailure } from '../agent-failure.js';
+import { parseRetryAfter } from '../agent-recovery.js';
 // Forked from openclaw-channel-octo v1.0.13 (2026-06-04)
 // Source: https://github.com/Mininglamp-OSS/openclaw-channel-octo
 // Removed: COS upload, GROUP.md API, OBO, rich text, media, thread/group management,
@@ -60,7 +62,7 @@ export async function postJson<T>(
   signal?: AbortSignal,
 ): Promise<T | undefined> {
   const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
-  const effectiveSignal = signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const effectiveSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(DEFAULT_TIMEOUT_MS)]) : AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -72,8 +74,9 @@ export async function postJson<T>(
   });
 
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`Octo API ${path} failed (${response.status}): ${text || response.statusText}`);
+    await response.body?.cancel();
+    const retryAfterMs = parseRetryAfter(response.headers?.get('retry-after') ?? undefined);
+    throw new AgentFailure({ stage: 'delivery', category: response.status === 401 ? 'auth' : response.status === 403 ? 'permission' : response.status === 429 ? 'rate_limited' : 'delivery_failed', source: 'octo_api', evidence: 'structured', httpStatus: response.status, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) });
   }
 
   const text = await response.text();
@@ -160,7 +163,7 @@ export async function getUploadCredentials(params: {
 }> {
   const base = params.apiUrl.replace(/\/+$/, "");
   const url = `${base}/v1/bot/upload/credentials?filename=${encodeURIComponent(params.filename)}`;
-  const effectiveSignal = params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const effectiveSignal = params.signal ? AbortSignal.any([params.signal, AbortSignal.timeout(DEFAULT_TIMEOUT_MS)]) : AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
   const response = await fetch(url, {
     method: "GET",
     headers: { Authorization: `Bearer ${params.botToken}` },
@@ -266,7 +269,7 @@ async function getJson<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
-  const effectiveSignal = signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const effectiveSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(DEFAULT_TIMEOUT_MS)]) : AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
   const resp = await fetch(url, {
     method: "GET",
     headers: {

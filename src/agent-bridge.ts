@@ -1,3 +1,5 @@
+import { recover, type RecoveryConfig } from './agent-recovery.js';
+import { AgentFailure, classifyFailure, type ExecutionRisk } from './agent-failure.js';
 /**
  * Agent Bridge — OpenAI Codex invocation via @openai/codex-sdk.
  * Outputs typed AgentOutputEvents (queryAgentEvents) or, for legacy callers,
@@ -21,7 +23,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import type { Config } from './config.js';
 import { fileURLToPath } from 'node:url';
-import { isSdkJsonlParseError, summarizeAgentError } from './agent-errors.js';
+import { isSdkJsonlParseError } from './agent-errors.js';
 import { resolveJsonlProxyPath } from './jsonl-proxy-path.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
@@ -318,7 +320,7 @@ export type MessagePhase = 'commentary' | 'final_answer' | 'unknown';
  *   `terminal` is `completed` only when `turn.completed` was seen.
  */
 export type AgentOutputEvent =
-  | { kind: 'attempt_start'; attempt: number; reason: 'initial' | 'stream_recovery' | 'fresh_retry'; continues: number | null }
+  | { kind: 'attempt_start'; attempt: number; reason: 'initial' | 'stream_recovery' | 'fresh_retry' | 'request_retry'; continues: number | null }
   | { kind: 'message'; attempt: number; itemId: string; seq: number; text: string; phase: MessagePhase }
   | { kind: 'work'; attempt: number; itemId: string; seq: number; itemType: string }
   | { kind: 'attempt_end'; attempt: number; terminal: 'completed' | 'no_terminal' };
@@ -329,9 +331,8 @@ export type AgentOutputEvent =
  *   - `resume`: a prior Codex thread id to continue.
  *   - `onSessionId`: called with the thread id and the actual prompt for this attempt.
  *   - `groupInstructions`: per-group operator instructions (GROUP.md).
- *   - `onResumeFailed`: called when a stale resume id is cleared.
- *   - `fallbackRetryPrompt`: pre-assembled prompt for a fresh retry after a
- *     stale-resume recovery (so history isn't lost).
+ *   - `onResumeFailed` / `fallbackRetryPrompt`: retained for source compatibility;
+ *     uncertain stale sessions are no longer cleared or freshly replayed.
  */
 export interface QueryAgentOptions {
   resume?: string;
@@ -340,6 +341,11 @@ export interface QueryAgentOptions {
   onResumeFailed?: () => void;
   fallbackRetryPrompt?: string;
   senderContext?: SafeText;
+  signal?: AbortSignal;
+  deadline?: number;
+  diagnosticId?: string;
+  assertPublishable?: () => void;
+  onExecutionRisk?: (risk: ExecutionRisk) => void;
 }
 
 /** Item types that never form a work boundary. */
@@ -408,6 +414,8 @@ export async function* queryAgentEvents(
   onToolUse?: (toolName: string, toolInput?: unknown) => void,
   opts?: QueryAgentOptions,
 ): AsyncIterable<AgentOutputEvent> {
+  opts?.signal?.throwIfAborted();
+  opts?.assertPublishable?.();
   // Frozen system text (security prefix + SOUL + group instructions).
   const systemPrompt = buildSystemPrompt(config.sdk.systemPrompt, opts?.groupInstructions);
 
@@ -455,44 +463,26 @@ export async function* queryAgentEvents(
   };
   const promptText = frameTurn(userMessage);
 
-  // Detect a stale/expired resume id from the error text. Matches only specific
-  // "session/thread missing" phrasings — NOT a bare "resume" substring, which
-  // would misfire on ordinary errors from the `codex exec resume` path (rate
-  // limits, CLI usage echoes, subprocess stderr) and wrongly drop a valid thread.
-  const isResumeError = (err: unknown): boolean => {
-    if (isSdkJsonlParseError(err)) return false;
-    const m = err instanceof Error ? err.message : String(err);
-    return /thread.*not.*found|no (conversation|session|thread|rollout) found|invalid.*(thread|session)|session.*not.*found|--resume requires a valid/i.test(m);
-  };
-
-  // Attempt bookkeeping. `attemptCtx` describes the NEXT run and is set by the
-  // recovery / fresh-retry paths below; `seq` is one counter for the whole call.
-  let attemptCtx: { reason: 'initial' | 'stream_recovery' | 'fresh_retry'; continues: number | null } = {
-    reason: 'initial',
-    continues: null,
-  };
+  let attemptCtx: { reason: 'initial' | 'request_retry'; continues: number | null } = { reason: 'initial', continues: null };
   let attemptCount = 0;
-  let lastAttempt = -1;
   let seq = 0;
 
-  // Drain one Codex run. Tracks `sideEffect.seen`: set true on ANY command/file/
-  // MCP/web-search event OR once a run completes with message text — so the
-  // caller knows whether a mid-run failure is still safe to fresh-retry (only
-  // before any side effect, else a retry could duplicate a command or file
-  // write).
+  // Drain one CLI execution; track positive effects independently from absence
+  // of events. Only an actual OS spawn rejection can prove non-execution.
   async function* runOnce(
     resumeId: string | undefined,
     prompt: string,
     sideEffect: { seen: boolean },
-    cap: { threadId?: string },
   ): AsyncIterable<AgentOutputEvent> {
     const attempt = attemptCount++;
-    lastAttempt = attempt;
     yield { kind: 'attempt_start', attempt, reason: attemptCtx.reason, continues: attemptCtx.continues };
     const thread = resumeId
       ? codex.resumeThread(resumeId, threadOpts)
       : codex.startThread(threadOpts);
-    const { events } = await thread.runStreamed(prompt);
+    opts?.signal?.throwIfAborted();
+    opts?.assertPublishable?.();
+    risk = 'unknown'; opts?.onExecutionRisk?.(risk);
+    const { events } = await thread.runStreamed(prompt, { signal: opts?.signal });
 
     let reportedSessionId = false;
     let completed = false;
@@ -511,19 +501,16 @@ export async function* queryAgentEvents(
     };
 
     for await (const ev of events as AsyncIterable<ThreadEvent>) {
+      opts?.signal?.throwIfAborted();
+      opts?.assertPublishable?.();
       switch (ev.type) {
         case 'thread.started': {
-          if (ev.thread_id) {
-            // Capture the real thread id for this run so a mid-turn stream
-            // interrupt can resume THIS thread (not a stale prior id).
-            cap.threadId = ev.thread_id;
-          }
           if (!reportedSessionId && opts?.onSessionId && ev.thread_id) {
             reportedSessionId = true;
             try {
               opts.onSessionId(ev.thread_id, prompt);
             } catch (err) {
-              console.error(`[codex-channel-octo] onSessionId callback threw: ${String(err)}`);
+              throw err;
             }
           }
           break;
@@ -538,7 +525,7 @@ export async function* queryAgentEvents(
             if (s.first) yield { kind: 'work', attempt, itemId: item.id, seq: s.seq, itemType: item.type };
           }
           if (isSideEffectItem(item.type)) {
-            sideEffect.seen = true;
+            sideEffect.seen = true; risk = 'effects_observed'; opts?.onExecutionRisk?.(risk);
             // Report redacted progress once per item start/complete.
             if (onToolUse && (ev.type === 'item.started' || ev.type === 'item.completed')) {
               const s = summarizeItem(item);
@@ -574,14 +561,14 @@ export async function* queryAgentEvents(
             // known notices; genuine tool/model failures must still throw.
             const modelChanged = /^This session was recorded with model `([^`\r\n]+)` but is resuming with `[^`\r\n]+`\. Consider switching back to `\1` as it may affect Codex performance\.$/.test(itemMsg);
             if (modelChanged || /^Model metadata for `[^`\r\n]+` not found\. Defaulting to fallback metadata(?:[.;]|$)/i.test(itemMsg)) {
-              console.warn(`[codex-channel-octo] non-fatal codex notice: ${itemMsg}`);
+              console.warn('[codex-channel-octo] non-fatal codex model notice');
             } else {
               // A genuine failed tool/model step reported AS an item (distinct
               // from the stream-level 'error' event). Surface it as a thrown
               // error so the turn doesn't silently produce zero output (which
               // would look like "no response") and so stale-resume detection can
               // run. Any side effect already seen suppresses retry.
-              throw new Error(itemMsg);
+              throw new AgentFailure(classifyFailure(new Error(itemMsg), 'sdk_event'));
             }
           } else if (
             (item.type === 'reasoning' || item.type === 'todo_list') &&
@@ -602,9 +589,9 @@ export async function* queryAgentEvents(
           completed = true;
           break;
         case 'turn.failed':
-          throw new Error(ev.error?.message ?? 'codex turn failed');
+          throw new AgentFailure(classifyFailure(new Error(ev.error?.message ?? ''), 'sdk_event'));
         case 'error':
-          throw new Error(ev.message ?? 'codex stream error');
+          throw new AgentFailure(classifyFailure(new Error(ev.message ?? ''), 'sdk_event'));
       }
     }
 
@@ -614,83 +601,22 @@ export async function* queryAgentEvents(
     yield { kind: 'attempt_end', attempt, terminal: completed ? 'completed' : 'no_terminal' };
   }
 
+  let risk: ExecutionRisk = 'proven_not_started';
   const sideEffect = { seen: false };
-  // At most ONE stream-interrupt recovery per queryAgent call, shared across the
-  // main run and any stale-resume fresh-retry so the two paths can't stack a
-  // second recovery.
-  let streamRecovered = false;
-
-  // Wrap a run so an upstream stream interrupt (see isStreamInterruptError) is
-  // recovered ONCE by resuming the SAME thread with a lightweight continuation
-  // prompt. The work already done lives in the thread history, so the resume
-  // continues rather than re-running commands (no duplicated side effects). Each
-  // run gets its own `cap` so the recoverable id is this run's real thread id
-  // (never a stale prior id); the recovery run reuses the same `sideEffect` so
-  // an outer stale-resume fresh-retry sees any side effect it produced.
-  async function* runWithStreamRecovery(
-    resumeId: string | undefined,
-    prompt: string,
-    se: { seen: boolean },
-  ): AsyncIterable<AgentOutputEvent> {
-    const cap: { threadId?: string } = { threadId: resumeId };
-    try {
-      yield* runOnce(resumeId, prompt, se, cap);
-    } catch (err) {
-      if (isSdkJsonlParseError(err)) se.seen = true;
-      if (isStreamInterruptError(err) && !streamRecovered && cap.threadId) {
-        streamRecovered = true;
-        attemptCtx = { reason: 'stream_recovery', continues: lastAttempt };
-        console.error(
-          `[codex-channel-octo] upstream stream interrupted — resuming thread ${cap.threadId} to continue: ${summarizeAgentError(err)}`,
-        );
-        const continuationPrompt = frameTurn('上次回复因连接中断未完成。请基于你已经完成的工作，直接继续并给出最终结论，不要重复已执行过的步骤。');
-        // Recovery run is OUTSIDE the try above: a second interrupt propagates
-        // rather than triggering another recovery (bounded to one).
-        try {
-          yield* runOnce(cap.threadId, continuationPrompt, se, { threadId: cap.threadId });
-        } catch (recoveryError) {
-          if (isSdkJsonlParseError(recoveryError)) se.seen = true;
-          throw recoveryError;
-        }
-        return;
+  let starts = 0;
+  async function* attempt(): AsyncIterable<AgentOutputEvent> {
+    if (starts++ > 0) attemptCtx = { reason: 'request_retry', continues: null };
+    try { yield* runOnce(opts?.resume, promptText, sideEffect); }
+    catch (error) {
+      const failure = classifyFailure(error);
+      // An OS spawn failure positively establishes that this process never ran.
+      // No event absence, thread ID absence or sandbox setting is such evidence.
+      if (failure.stage === 'spawn' && failure.evidence === 'structured' && !sideEffect.seen) {
+        risk = 'proven_not_started'; opts?.onExecutionRisk?.(risk);
       }
-      throw err;
+      throw error;
     }
   }
-
-  try {
-    yield* runWithStreamRecovery(opts?.resume, promptText, sideEffect);
-  } catch (err) {
-    // Stale/expired resume that failed BEFORE any side effect: clear the bad id
-    // and retry once WITHOUT resume, using the caller's pre-assembled fallback
-    // prompt (carries history) so continuity isn't lost.
-    if (opts?.resume && !sideEffect.seen && isResumeError(err)) {
-      console.error(
-        `[codex-channel-octo] resume failed for a stale thread id — clearing and retrying fresh: ${summarizeAgentError(err)}`,
-      );
-      try {
-        opts.onResumeFailed?.();
-      } catch (cbErr) {
-        console.error(`[codex-channel-octo] onResumeFailed callback threw: ${String(cbErr)}`);
-      }
-      attemptCtx = { reason: 'fresh_retry', continues: null };
-      const retryPrompt = opts.fallbackRetryPrompt
-        ? frameTurn(opts.fallbackRetryPrompt)
-        : promptText;
-      // Fresh-retry also goes through recovery (shares streamRecovered), so a
-      // stream interrupt on the fresh thread can still be resumed once.
-      yield* runWithStreamRecovery(undefined, retryPrompt, sideEffect);
-      return;
-    }
-    // Resume error after a side effect: do NOT retry (would duplicate work), but
-    // still clear the stale id so the next turn starts fresh.
-    if (opts?.resume && isResumeError(err)) {
-      try {
-        opts.onResumeFailed?.();
-      } catch (cbErr) {
-        console.error(`[codex-channel-octo] onResumeFailed callback threw: ${String(cbErr)}`);
-      }
-    }
-    throw err;
-  }
+  yield* recover(attempt, { config: config.sdk.recovery as RecoveryConfig | undefined,
+    signal: opts?.signal, deadline: opts?.deadline, id: opts?.diagnosticId, risk: () => risk });
 }

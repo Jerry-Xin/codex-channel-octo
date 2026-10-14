@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 vi.mock('../octo/api.js', () => ({
-  sendMessage: vi.fn().mockResolvedValue(undefined),
+  sendMessage: vi.fn().mockResolvedValue({message_id:'123',message_seq:1}),
   sendTyping: vi.fn().mockResolvedValue(undefined),
   sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getGroupMembers: vi.fn().mockResolvedValue([]),
@@ -187,7 +187,7 @@ describe('output selection wiring', () => {
     await run(config);
     expect(relayInputs()).toEqual([]);
     expect(appendSpy).not.toHaveBeenCalled();
-    expect(sentContents()).toEqual(['An error occurred while processing your message. Please try again.']);
+    expect(sentContents()).toEqual([expect.stringContaining('模型处理未完成')]);
   });
 
   it('empty selection → existing "No response generated" notice, nothing stored', async () => {

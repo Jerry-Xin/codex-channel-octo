@@ -11,7 +11,7 @@ import { join } from 'node:path';
 // --- Mocks (hoisted before imports) ---
 
 vi.mock('../octo/api.js', () => ({
-  sendMessage: vi.fn().mockResolvedValue(undefined),
+  sendMessage: vi.fn().mockResolvedValue({message_id:'123',message_seq:1}),
   sendTyping: vi.fn().mockResolvedValue(undefined),
   sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getGroupMembers: vi.fn().mockResolvedValue([]),
@@ -740,7 +740,7 @@ describe('E2E smoke tests', () => {
     // Error reply should be sent
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: 'An error occurred while processing your message. Please try again.',
+        content: expect.stringContaining('模型处理未完成'),
       }),
     );
   });
@@ -755,7 +755,7 @@ describe('E2E smoke tests', () => {
 
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: '模型响应流或本地传输解析失败，自动恢复未成功，请稍后重发。',
+        content: expect.stringContaining('模型处理未完成'),
       }),
     );
   });

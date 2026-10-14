@@ -13,7 +13,7 @@ vi.mock('../octo/api.js', () => ({
   getMentionPreference: vi.fn(),
   getGroupMembers: vi.fn().mockResolvedValue([{ uid: 'human', name: 'Human', role: 0, robot: 0 }]),
   getGroupMd: vi.fn(), getThreadMd: vi.fn(),
-  sendMessage: vi.fn().mockResolvedValue({ message_id: 'reply', message_seq: 2, client_msg_no: 'reply' }),
+  sendMessage: vi.fn().mockResolvedValue({ message_id: '123', message_seq: 2 }),
   sendTyping: vi.fn().mockResolvedValue(undefined), sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getChannelMessages: vi.fn().mockResolvedValue([]), generateClientMsgNo: vi.fn(), fetchUserInfo: vi.fn(),
 }));

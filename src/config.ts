@@ -1,3 +1,4 @@
+import { validateRecovery, type RecoveryConfig } from './agent-recovery.js';
 /**
  * Configuration loading.
  *
@@ -126,6 +127,8 @@ export interface Config {
      * stdout/stderr, no diff, no full args) — see agent-bridge.
      */
     toolProgress?: boolean;
+    /** Bounded pre-execution recovery. Default disabled. */
+    recovery?: RecoveryConfig;
     /**
      * How the user-facing reply is selected from a turn's agent messages:
      * - `phase` (default): known final answers when the runtime labels them,
@@ -730,6 +733,7 @@ function assertSdkEnums(id: string, sdk: Config['sdk']): void {
   check('modelReasoningEffort', sdk.modelReasoningEffort, ['minimal', 'low', 'medium', 'high', 'xhigh']);
   check('webSearchMode', sdk.webSearchMode, ['disabled', 'cached', 'live']);
   check('outputSelection', sdk.outputSelection, ['phase', 'heuristic', 'legacy']);
+  validateRecovery(sdk.recovery);
 }
 
 /**

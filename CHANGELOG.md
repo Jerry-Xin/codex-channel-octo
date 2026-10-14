@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Add safe failure categories, bounded opt-in pre-execution recovery and cancellable
+  dispatch. Quarantine uncertain timed-out/crashed execution, fence late callbacks,
+  persist delivery outcomes and commit confirmed history once per turn. Stop
+  automatic replay/continuation when execution safety cannot be established.
+
+
 - Keep Octo recovery alive after failed token refreshes and cooldown-suppressed
   requests, independently of successful REST heartbeats. Coalesce retry timers,
   ignore retired-socket callbacks and cancel/abort recovery on shutdown.
