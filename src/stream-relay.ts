@@ -290,7 +290,10 @@ export class StreamRelay {
             lifecycle?.store.markDeliveryPart(lifecycle.turn.turnId, index, 'unknown');
             const result = await sendMessage(part);
             check();
-            const id = result?.client_msg_no !== undefined && result.client_msg_no !== part.clientMsgNo ? undefined : confirmedMessageId(result?.message_id);
+            // The send endpoint can return a server-generated client_msg_no.
+            // Correlate this acknowledgement through the awaited HTTP request;
+            // the returned key is not required to echo the submitted dedup key.
+            const id = confirmedMessageId(result?.message_id);
             const state = id ? 'confirmed' : 'unknown';
             lifecycle?.store.markDeliveryPart(lifecycle.turn.turnId, index, state, id);
             report.parts.push({ clientMsgNo: part.clientMsgNo!, state, ...(id ? { messageId: id } : {}) });

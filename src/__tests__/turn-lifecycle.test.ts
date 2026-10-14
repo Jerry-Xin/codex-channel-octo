@@ -61,9 +61,17 @@ describe('delivery outcome and outbox',()=>{
   const part=adapter.prepare('SELECT * FROM delivery_parts').get() as {payload:string;client_msg_no:string};expect(part.payload).not.toContain('PRIVATE_TOKEN');expect(part.client_msg_no).toBe(vi.mocked(sendMessage).mock.calls[0][0].clientMsgNo);
   store.commitTurnOutput(turn.turnId);store.commitTurnOutput(turn.turnId);expect(store.buildHistoryPrefix('s',10).match(/answer/g)).toHaveLength(1);
  });
- it.each([undefined,{message_id:'invalid'},{message_id:0},{message_id:9007199254740992},{message_id:'9223372036854775808'},{message_id:'1',client_msg_no:'wrong'}])('does not mark an unverified acknowledgement as delivered: %j',async result=>{
+ it.each([undefined,{message_id:'invalid'},{message_id:0},{message_id:9007199254740992},{message_id:'9223372036854775808'}])('does not mark an unverified acknowledgement as delivered: %j',async result=>{
   vi.mocked(sendMessage).mockResolvedValue(result as never);await expect(deliver('answer')).rejects.toMatchObject({snapshot:{stage:'delivery'}});
   expect(adapter.prepare('SELECT state FROM delivery_parts').get()).toMatchObject({state:'unknown'});expect(store.buildHistoryPrefix('s',10)).toBe('');
+ });
+ it('confirms a valid response even when the server rewrites the client message key',async()=>{
+  vi.mocked(sendMessage).mockResolvedValue({message_id:'123',message_seq:1,client_msg_no:'server-generated-key'});
+  const {turn,report}=await deliver('answer');
+  expect(report.parts).toMatchObject([{state:'confirmed',messageId:'123'}]);
+  expect(vi.mocked(sendMessage).mock.calls[0][0].clientMsgNo).not.toBe('server-generated-key');
+  store.commitTurnOutput(turn.turnId);
+  expect(store.buildHistoryPrefix('s',10).match(/answer/g)).toHaveLength(1);
  });
  it('stops subsequent segments after one ambiguous send; never loses generated output',async()=>{
   vi.mocked(sendMessage).mockResolvedValueOnce({message_id:'1',message_seq:1}).mockRejectedValueOnce(new Error('PRIVATE_RESPONSE'));
