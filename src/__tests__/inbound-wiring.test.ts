@@ -89,6 +89,27 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     rmSync(root, { recursive: true, force: true });
   });
 
+  it.each(['new task','继续上个任务'])('dispatches %s after a failed runner stops, with interruption context and no replay', async content => {
+    const route=vi.spyOn(stack!.router,'routeAndHandle');spies.push(route);
+    const stopped={waitForStopped:vi.fn().mockResolvedValue(true),dispose:vi.fn()};
+    vi.mocked(queryAgent).mockImplementationOnce(async function* (_message,_config,_ctx,_tools,options) {
+      options?.onManagedExecution?.(stopped);
+      throw new Error('synthetic SDK failure');
+    });
+    const inbound=message({channel_type:ChannelType.DM,channel_id:'human',payload:{type:MessageType.Text,content:'original task'}});
+    emit(inbound);await route.mock.results[0].value;
+    expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('模型处理未完成');
+    vi.mocked(queryAgent).mockImplementationOnce(async function* (_message,_config,_ctx,_tools,options) {
+      expect(options?.interruptedTurn).toMatchObject({reason:'failed',stage:'inference',executionRisk:'unknown'});
+      yield 'new response';
+    });
+    emit({...inbound,message_id:'second',message_seq:2,payload:{type:MessageType.Text,content}});
+    await route.mock.results[1].value;
+    expect(queryAgent).toHaveBeenCalledTimes(2);expect(stopped.waitForStopped).toHaveBeenCalledOnce();
+    expect(vi.mocked(queryAgent).mock.calls[1][0]).toContain(content);
+    expect(vi.mocked(sendMessage).mock.calls.some(call=>call[0].content==='new response')).toBe(true);
+  });
+
   it.each([true, false])('immediately invalidates a self-authored toggle (previously %s) without caching or dispatching it', async (effective) => {
     const router = stack!.router;
     vi.mocked(getMentionPreference).mockResolvedValue(effective);

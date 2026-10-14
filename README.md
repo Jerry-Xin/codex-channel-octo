@@ -204,9 +204,9 @@ Apache-2.0
 
 ### Safe failure handling and recovery
 
-Failures carry a safe diagnostic ID and category. A model/stream failure can pause the conversation even without visible tool events: absence of events does not prove non-execution. Timeouts or shutdown before model execution starts do not create an execution quarantine. Unknown or observed effects remain paused; `/reset` and restart cannot waive that uncertainty.
+Failures carry a safe diagnostic ID and category. New user requests, including explicit continuation, can run after the interrupted handler and its managed execution have stopped. Timeouts cancel and fence the old turn; new requests queue during bounded cleanup. A failed-task snapshot preserves stage and execution risk for the next request without automatically replaying old work or claiming external rollback. See [session continuity](docs/session-continuity.md). Missing teardown proof and historical/crash quarantine retain the maintenance path; `/reset` and restart cannot waive that protection.
 
-After checking the prior task's effects, the **registered Octo owner** can recover only the affected conversation while the bot stays online:
+If managed teardown cannot be confirmed, after checking the prior task's execution and effects, the **registered Octo owner** can recover only the affected conversation while the bot stays online:
 
 ```text
 /reconcile <turn-id> --external-results-verified

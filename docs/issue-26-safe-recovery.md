@@ -9,9 +9,9 @@ Implementation baseline: main b381706. The original analysis is in issue #26 and
 - A single recovery scheduler bounds attempts, cancellable jittered backoff and elapsed time. It honors a trusted Retry-After minimum without truncating it into an early retry. Current SDK versions do not expose provider headers: the adapter does not invent them or claim it can count CLI-internal network retries.
 - New retries default off. With retries on, only a positively established pre-execution temporary failure is eligible in the current runtime (e.g. EAGAIN/EMFILE/ENFILE from OS spawn). A missing thread ID, missing tool event, read-only filesystem sandbox or same-thread continuation does not establish safe execution. SDK HTTP-shaped errors improve diagnostics but cannot establish that tools did not execute.
 - Consequently old automatic stream continuation and stale-thread fresh replay are intentionally disabled for uncertain runs, even when new retries are off. Existing thread mappings are retained for operator reconciliation rather than silently cleared. Unused stale-replay callbacks and their per-turn fallback prompt assembly have been removed. This is a safety behavior change, not a claim of complete legacy retry compatibility.
-- Timeout revokes publication and propagates AbortSignal to the SDK, relay and network sends. The existing JSONL proxy forwards termination and escalates an uncooperative direct child. External commands, detached children or remote writes may outlive cancellation: the session remains quarantined instead of claiming termination or exactly-once execution.
-- Uncertain timed-out sessions reject new model work; authenticated transport gates and the owner reconciliation command still run. Active turns left by a process crash become quarantined only after the new gateway acquires its singleton lock. TTL, /reset and restart cannot clear execution uncertainty. Normal completion revokes late callback publication as well.
-- Shutdown tracks real handlers, cancels active turns and records quarantine for unknown/observed execution before closing the store. Positively unstarted turns remain clean on timeout or shutdown. A timed-out handler's late completion cannot overwrite the quarantine or a new turn's state.
+- Timeout revokes publication and propagates AbortSignal to the SDK, relay and network sends. The proxy now confirms owned POSIX group teardown. After handler settlement and teardown proof, the session admits new user requests while preserving a failed-task snapshot; external/detached effects may still require checking. See [the #39 continuity policy](session-continuity.md).
+- Timed-out sessions whose managed teardown remains unconfirmed reject new model work; authenticated transport gates and the owner reconciliation command still run. Active turns left by a process crash become quarantined only after the new gateway acquires its singleton lock. TTL, /reset and restart cannot clear execution uncertainty. Normal completion revokes late callback publication as well.
+- Shutdown tracks real handlers, cancels active turns and records quarantine for unknown/observed execution before closing the store. Positively unstarted turns remain clean on timeout or shutdown. A timed-out handler's late publication cannot affect a new turn. Cleanup may release only its exact execution generation after managed teardown proof, preserving interruption metadata.
 
 ## Configuration
 
@@ -51,9 +51,9 @@ SELECT turn_id, part_index, state, message_id FROM delivery_parts;
 
 Do not copy message content, signed URLs or credentials into diagnostic logs.
 
-## Releasing an execution quarantine
+## Maintenance when managed teardown cannot be confirmed
 
-First confirm that the task's managed execution has stopped and check any external effects. Cancellation, promise settlement, missing tool events, reset and restart are not external-effect verification.
+The normal stopped-execution path requires no owner command. For legacy/crash records or missing teardown proof, first confirm that the task's managed execution has stopped and check any external effects. Cancellation, promise settlement, missing tool events, reset and restart are not external-effect verification.
 
 The registered Octo owner can recover the affected session in-process:
 

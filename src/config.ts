@@ -192,10 +192,10 @@ export interface Config {
   /**
    * Per-message dispatch timeout in ms (#141). Bounds the full handler
    * pipeline (agent query + stream) under the per-session lock. If a turn
-   * hangs past this, the session lock is released (a hung turn would otherwise
-   * block every subsequent message on that session forever) and the user gets
-   * a one-shot apology. Does NOT cancel the in-flight turn — only unblocks the
-   * queue. Default 5 minutes.
+   * exceeds this, cancellation revokes its output/store authority immediately.
+   * Queued new requests can start after handler settlement and managed teardown
+   * proof; missing proof retains maintenance protection. Read from the global
+   * configuration (not a per-bot override). Default 5 minutes; <=0 disables it.
    */
   dispatchTimeoutMs: number;
   botBlocklist?: string[];

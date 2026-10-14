@@ -1,5 +1,7 @@
 import { recover, type RecoveryConfig } from './agent-recovery.js';
 import { AgentFailure, classifyFailure, type ExecutionRisk } from './agent-failure.js';
+import { ExecutionScope, type ManagedExecution } from './execution-scope.js';
+import type { InterruptedTurn } from './turn-context.js';
 /**
  * Agent Bridge — OpenAI Codex invocation via @openai/codex-sdk.
  * Outputs typed AgentOutputEvents (queryAgentEvents) or, for legacy callers,
@@ -26,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveJsonlProxyPath } from './jsonl-proxy-path.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
-import { trustedText, escapeSectionMarkers, safeSenderMetadata, CURRENT_MESSAGE_ANCHOR, CURRENT_SENDER_ANCHOR } from './prompt-safety.js';
+import { trustedText, escapeSectionMarkers, safeSenderMetadata, CURRENT_MESSAGE_ANCHOR, CURRENT_SENDER_ANCHOR, PREVIOUS_TASK_ANCHOR } from './prompt-safety.js';
 import type { SafeText } from './prompt-safety.js';
 
 /**
@@ -320,6 +322,24 @@ export interface QueryAgentOptions {
   diagnosticId?: string;
   assertPublishable?: () => void;
   onExecutionRisk?: (risk: ExecutionRisk) => void;
+  onManagedExecution?: (execution: ManagedExecution) => void;
+  interruptedTurn?: InterruptedTurn;
+}
+
+/** Closed runtime metadata, never a previous user prompt or raw tool/error text. */
+export function interruptionContext(turn?: InterruptedTurn): string {
+  if (!turn) return '';
+  if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(turn.turnId)
+    || !['failed','cancelled','timed_out'].includes(turn.reason)
+    || !['proven_not_started','unknown','effects_observed'].includes(turn.executionRisk)
+    || !['prepare','spawn','inference','jsonl_parse','process_exit','delivery','history_commit','cleanup'].includes(turn.stage)) {
+    throw new Error('Invalid interrupted-task metadata');
+  }
+  return `${PREVIOUS_TASK_ANCHOR}\nTask ${turn.turnId}: ${turn.reason}; stage=${turn.stage}; effects=${turn.executionRisk}.\n`
+    + 'The managed execution has ended. This does not prove rollback or non-execution of external operations. '
+    + 'Handle only the current user request; never automatically replay the previous request. '
+    + 'If the user asks to continue, inspect actual work/results first and continue remaining steps; verify uncertain operations before repeating them. '
+    + 'A delivery/history failure may follow completed execution: inspect its existing result rather than running it again.\n\n';
 }
 
 /** Item types that never form a work boundary. */
@@ -402,12 +422,13 @@ export async function* queryAgentEvents(
   const agentsMdOk = writeAgentsMd(cwd, systemPrompt);
 
   const env = buildCodexEnv(config.sdk, process.env);
-  const codex = new Codex({
+  const codexOptions = {
     codexPathOverride: resolveJsonlProxyPath(fileURLToPath(new URL('./codex-jsonl-proxy.mjs', import.meta.url))),
     ...(config.sdk.codexApiKey ? { apiKey: config.sdk.codexApiKey } : {}),
     ...(config.sdk.codexBaseUrl ? { baseUrl: config.sdk.codexBaseUrl } : {}),
     ...(env ? { env } : {}),
-  });
+  };
+  const codex = opts?.onManagedExecution ? undefined : new Codex(codexOptions);
   const threadOpts = buildThreadOptions(config, cwd);
   // Do not execute with stale instructions or silently re-enable a sandbox
   // the operator explicitly disabled (which may be unavailable in a container).
@@ -433,13 +454,14 @@ export async function* queryAgentEvents(
   /** Identity precedes all background/request text on every initial or recovery run. */
   const frameTurn = (message: string): string => {
     const anchored = message.split(/\r\n|[\r\n\u2028\u2029]/).some((line) => line === CURRENT_MESSAGE_ANCHOR) ? message : `${CURRENT_MESSAGE_ANCHOR}\n${message}`;
-    return `${SECURITY_PROMPT_PREFIX}\n\n${senderContext}\n---\n\n${anchored}`;
+    return `${SECURITY_PROMPT_PREFIX}\n\n${senderContext}\n---\n\n${interruptionContext(opts?.interruptedTurn)}${anchored}`;
   };
   const promptText = frameTurn(userMessage);
 
   let attemptCtx: { reason: 'initial' | 'request_retry'; continues: number | null } = { reason: 'initial', continues: null };
   let attemptCount = 0;
   let seq = 0;
+  let attemptScope: ExecutionScope | undefined;
 
   // Drain one CLI execution; track positive effects independently from absence
   // of events. Only an actual OS spawn rejection can prove non-execution.
@@ -449,13 +471,19 @@ export async function* queryAgentEvents(
     sideEffect: { seen: boolean },
   ): AsyncIterable<AgentOutputEvent> {
     const attempt = attemptCount++;
+    const scope = opts?.onManagedExecution ? new ExecutionScope() : undefined;
+    attemptScope = scope;
+    if (scope) opts?.onManagedExecution?.(scope);
+    const baseEnv = env ?? Object.fromEntries(Object.entries(process.env).filter((pair): pair is [string,string] => pair[1] !== undefined));
+    const client = codex ?? new Codex({ ...codexOptions, env: scope!.environment(baseEnv) });
     yield { kind: 'attempt_start', attempt, reason: attemptCtx.reason, continues: attemptCtx.continues };
     const thread = resumeId
-      ? codex.resumeThread(resumeId, threadOpts)
-      : codex.startThread(threadOpts);
+      ? client.resumeThread(resumeId, threadOpts)
+      : client.startThread(threadOpts);
     opts?.signal?.throwIfAborted();
     opts?.assertPublishable?.();
     risk = 'unknown'; opts?.onExecutionRisk?.(risk);
+    scope?.expectLaunch();
     const { events } = await thread.runStreamed(prompt, { signal: opts?.signal });
 
     let reportedSessionId = false;
@@ -582,6 +610,7 @@ export async function* queryAgentEvents(
       // An OS spawn failure positively establishes that this process never ran.
       // No event absence, thread ID absence or sandbox setting is such evidence.
       if (failure.stage === 'spawn' && failure.evidence === 'structured' && !sideEffect.seen) {
+        attemptScope?.confirmNotStarted();
         risk = 'proven_not_started'; opts?.onExecutionRisk?.(risk);
       }
       throw error;

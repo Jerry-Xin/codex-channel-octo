@@ -733,6 +733,8 @@ export async function handleMessage(
       // replay or mapping deletion is allowed based on missing tool events.
       let sessionOpts: QueryAgentOptions | undefined = {
         signal: turn.signal, deadline: turn.deadline, diagnosticId: turn.turnId,
+        onManagedExecution: execution => turn.registerExecution(execution),
+        interruptedTurn: result.interruptedTurn,
         assertPublishable: () => turn.assertPublishable(),
         onExecutionRisk: risk => { turn.executionRisk = risk; },
         senderContext: buildSenderContext(msg, router.getOwnerUid()),
@@ -757,7 +759,7 @@ export async function handleMessage(
         }
       }
 
-      stage = 'inference';
+      stage = 'inference'; turn.stage = stage;
       const agentEvents = queryAgentEvents(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);
 
       // Select ONE reply for both delivery and history. The relay drains the
@@ -778,9 +780,9 @@ export async function handleMessage(
         console.log(describeSelection(selected, outputMode, collector.attemptCount));
         if (selected.text) {
           turn.assertPublishable();
-          stage = 'history_commit';
+          stage = 'history_commit'; turn.stage = stage;
           turnStore.saveTurnOutput(turn.turnId, sessionKey, selected.text, msg.message_seq, botId);
-          stage = 'delivery';
+          stage = 'delivery'; turn.stage = stage;
           yield selected.text;
         }
       }
@@ -814,7 +816,7 @@ export async function handleMessage(
       // Same bytes the relay received (mention rendering is delivery-only).
       const fullResponse = selected?.text ?? '';
       if (fullResponse) {
-        stage = 'history_commit';
+        stage = 'history_commit'; turn.stage = stage;
         turn.assertPublishable();
         turnStore.commitTurnOutput(turn.turnId);
         // G10: mark this message_seq as the last one we replied to. Next turn's
@@ -838,6 +840,7 @@ export async function handleMessage(
 
     } catch (err) {
       if (turn.signal.aborted) return; // Router owns timeout/shutdown feedback.
+      turn.interruption = 'failed';
       turn.assertPublishable();
       const failure = err instanceof TurnFailure ? err.report : {
         diagnosticId: turn.turnId, attempts: modelAttempts,
