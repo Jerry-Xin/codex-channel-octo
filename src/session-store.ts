@@ -142,6 +142,12 @@ export class SessionStore {
     const row = this.adapter.prepare('SELECT state FROM turn_execution WHERE session_key = ?').get(session) as { state: string } | undefined;
     return row?.state === 'quarantined' || row?.state === 'active';
   }
+  getQuarantinedTurnId(session: string): string | undefined {
+    return (this.adapter.prepare("SELECT turn_id FROM turn_execution WHERE session_key=? AND state IN ('active','quarantined')").get(session) as {turn_id:string} | undefined)?.turn_id;
+  }
+  quarantinedTurnCount(): number {
+    return (this.adapter.prepare("SELECT count(*) AS count FROM turn_execution WHERE state='quarantined'").get() as {count:number}).count;
+  }
   beginTurn(session: string, turnId: string): number {
     return this.adapter.transaction(() => {
       if (this.isTurnQuarantined(session)) throw new Error('Session requires execution reconciliation');
@@ -320,6 +326,8 @@ export class SessionStore {
 
   cleanExpired(): number {
     const cutoff = Date.now() - SEVEN_DAYS_MS;
+    // Keep unresolved execution evidence; completed tombstones can expire.
+    this.adapter.prepare("DELETE FROM turn_execution WHERE state='clean' AND updated_at < ?").run(cutoff);
     this.adapter.prepare('DELETE FROM delivery_parts WHERE turn_id IN (SELECT turn_id FROM turn_outputs WHERE created_at < ?)').run(cutoff);
     this.adapter.prepare('DELETE FROM turn_outputs WHERE created_at < ?').run(cutoff);
     const result = this.deleteExpired.run(cutoff);

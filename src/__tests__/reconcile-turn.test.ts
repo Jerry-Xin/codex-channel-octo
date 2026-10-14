@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { reconcile } from '../reconcile-turn.js';
+import { reconcile, ReconciliationError, reconciliationMessage } from '../reconcile-turn.js';
 import { createAdapter } from '../db-adapter.js';
 import { SessionStore } from '../session-store.js';
 let root:string;let db:string;
@@ -18,3 +18,12 @@ describe('offline execution reconciliation',()=>{
  });
  it('does not create a missing database',()=>{const missing=join(root,'missing.db');expect(()=>reconcile(missing,'s','t',true)).toThrow();expect(existsSync(missing)).toBe(false);});
 });
+
+ describe('safe maintenance diagnostics', () => {
+  it('distinguishes operator actions without exposing raw exceptions', () => {
+    expect(reconciliationMessage(new ReconciliationError('gateway_locked'))).toContain('gateway lock');
+    expect(reconciliationMessage(new ReconciliationError('database_missing'))).toContain('does not exist');
+    expect(reconciliationMessage(new ReconciliationError('turn_mismatch'))).toContain('matches');
+    expect(reconciliationMessage(new Error('PRIVATE_DATABASE_PATH'))).not.toContain('PRIVATE_DATABASE_PATH');
+  });
+ });

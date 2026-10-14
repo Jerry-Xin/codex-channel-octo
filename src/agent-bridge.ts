@@ -23,7 +23,6 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import type { Config } from './config.js';
 import { fileURLToPath } from 'node:url';
-import { isSdkJsonlParseError } from './agent-errors.js';
 import { resolveJsonlProxyPath } from './jsonl-proxy-path.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
@@ -279,27 +278,6 @@ function isSideEffectItem(type: ThreadItem['type']): boolean {
   );
 }
 
-/**
- * True when an error is an upstream *stream interrupt* — the codex↔model SSE
- * stream was cut before the response completed and codex's own reconnect
- * attempts were exhausted. These are recoverable by resuming the SAME thread
- * (the work already done is in the thread history), so they get special
- * handling distinct from a stale-resume error.
- *
- * Matches ONLY the interrupt-specific phrases. A bare "Codex Exec exited with
- * code 1" is NOT matched on its own: the SDK wraps ANY non-zero subprocess exit
- * (bad config, bad args, model error) in that prefix, so matching it would
- * wrongly funnel unrelated failures into resume-recovery. The real interrupt
- * text always carries one of the phrases below (e.g. the log line
- * "Reconnecting... 1/5 (stream disconnected before completion: stream closed
- * before response.completed)").
- */
-export function isStreamInterruptError(err: unknown): boolean {
-  if (isSdkJsonlParseError(err)) return true;
-  const m = err instanceof Error ? err.message : String(err);
-  return /stream closed before response\.completed|stream disconnected before completion/i.test(m);
-}
-
 /** Output intent of an agent message, read defensively from the raw item. */
 export type MessagePhase = 'commentary' | 'final_answer' | 'unknown';
 
@@ -331,15 +309,11 @@ export type AgentOutputEvent =
  *   - `resume`: a prior Codex thread id to continue.
  *   - `onSessionId`: called with the thread id and the actual prompt for this attempt.
  *   - `groupInstructions`: per-group operator instructions (GROUP.md).
- *   - `onResumeFailed` / `fallbackRetryPrompt`: retained for source compatibility;
- *     uncertain stale sessions are no longer cleared or freshly replayed.
  */
 export interface QueryAgentOptions {
   resume?: string;
   onSessionId?: (id: string, prompt: string) => void;
   groupInstructions?: string;
-  onResumeFailed?: () => void;
-  fallbackRetryPrompt?: string;
   senderContext?: SafeText;
   signal?: AbortSignal;
   deadline?: number;
@@ -507,11 +481,7 @@ export async function* queryAgentEvents(
         case 'thread.started': {
           if (!reportedSessionId && opts?.onSessionId && ev.thread_id) {
             reportedSessionId = true;
-            try {
-              opts.onSessionId(ev.thread_id, prompt);
-            } catch (err) {
-              throw err;
-            }
+            opts.onSessionId(ev.thread_id, prompt);
           }
           break;
         }

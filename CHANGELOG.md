@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Registered owners can reconcile one paused conversation in chat without taking the gateway offline. Pause notices include its exact task ID; active local handlers, wrong task IDs and non-owners cannot release it. Offline release is no longer shadowed by an in-memory pause flag.
+- Timeout and graceful shutdown do not quarantine positively unstarted model turns. Unknown/observed effects remain protected and are never automatically replayed.
+- Completed execution tombstones expire with retention; unresolved evidence survives. Removed unused stale-replay options and prompt assembly.
+
 ### Added
 
 - Per-turn transport sender metadata matched to the registration UID or its

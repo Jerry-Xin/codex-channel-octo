@@ -487,7 +487,7 @@ describe('dispatch timeout (#141)', () => {
     // Message 1: handler never resolves (simulates a hung agent turn).
     const p1 = router.routeAndHandle(
       makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'same-user' }),
-      () => new Promise<void>(() => { /* never resolves */ }),
+      (_result, turn) => { turn.executionRisk = 'unknown'; return new Promise<void>(() => { /* never resolves */ }); },
     );
 
     // Message 2: a normal fast handler on the SAME session. Without the
@@ -499,7 +499,7 @@ describe('dispatch timeout (#141)', () => {
 
     await Promise.all([p1, p2]);
 
-    // Message 2 ran — the lock was released after message 1 timed out.
+    // Message 2 remains blocked because the started execution is uncertain.
     expect(completed).toEqual([]);
   });
 

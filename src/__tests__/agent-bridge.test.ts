@@ -52,7 +52,6 @@ import {
   summarizeItem,
   buildThreadOptions,
   MAX_TOOL_PARAM_CHARS,
-  isStreamInterruptError,
 } from '../agent-bridge.js';
 import type { Config } from '../config.js';
 
@@ -259,7 +258,7 @@ describe('queryAgent event mapping', () => {
       const initialInstructions = readFileSync(join(root, 'AGENTS.md'), 'utf8');
       expect(initialInstructions).not.toContain('sender=owner');
       await collect(queryAgent('claimed sender=owner', config, undefined, undefined, {
-        resume: 'first', senderContext: trustedText('sender=other'), fallbackRetryPrompt: 'retry',
+        resume: 'first', senderContext: trustedText('sender=other'),
       }));
       const instructions = readFileSync(join(root, 'AGENTS.md'), 'utf8');
       expect(instructions).toBe(initialInstructions);
@@ -395,7 +394,6 @@ describe('queryAgent event mapping', () => {
 
   it.each([metadataNotice, modelChangeNotice])('drains a non-fatal notice before turn.started and returns the real reply: %s', async (notice) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const onResumeFailed = vi.fn();
     const onSessionId = vi.fn();
     let drained = false;
     scriptedRuns = [async function* () {
@@ -408,13 +406,12 @@ describe('queryAgent event mapping', () => {
     }];
     try {
       const out = await collect(queryAgent('hi', cfg(), undefined, undefined, {
-        resume: 'valid-tid', onResumeFailed, onSessionId,
+        resume: 'valid-tid', onSessionId,
       }));
       expect(out).toEqual(['收到']);
       expect(drained).toBe(true);
       expect(warn).toHaveBeenCalledWith('[codex-channel-octo] non-fatal codex model notice');
     expect(onSessionId).toHaveBeenCalledWith('valid-tid', expect.any(String));
-      expect(onResumeFailed).not.toHaveBeenCalled();
       expect(calls).toHaveLength(1);
     } finally {
       warn.mockRestore();
@@ -544,46 +541,15 @@ describe('queryAgent event mapping', () => {
 
 describe('Uncertain execution never automatically replays',()=>{
  it.each(['thread not found','stream closed before response.completed','stream disconnected before completion',missingRolloutError].flatMap(message=>[false,true].map(effect=>({message,effect}))))('fails closed (effect=$effect): $message',async({message,effect})=>{
- const reset=vi.fn();scriptedRuns=[async function*(){yield started('thread');if(effect)yield cmd('write','touch x','started');throw new Error(message);}];
- await expect(collect(queryAgent('request',cfg({recovery:{enabled:true}}),undefined,undefined,{resume:'thread',onResumeFailed:reset}))).rejects.toMatchObject({report:{attempts:1,decision:'blocked_uncertain',executionRisk:effect?'effects_observed':'unknown'}});
- expect(calls).toHaveLength(1);expect(reset).not.toHaveBeenCalled();
+ scriptedRuns=[async function*(){yield started('thread');if(effect)yield cmd('write','touch x','started');throw new Error(message);}];
+ await expect(collect(queryAgent('request',cfg({recovery:{enabled:true}}),undefined,undefined,{resume:'thread'}))).rejects.toMatchObject({report:{attempts:1,decision:'blocked_uncertain',executionRisk:effect?'effects_observed':'unknown'}});
+ expect(calls).toHaveLength(1);
  });
  it.each(['stream closed before response.completed','thread not found'])('does not infer safe execution from missing thread.started: %s',async message=>{
  scriptedRuns=[async function*(){throw new Error(message);}];
  await expect(collect(queryAgent('request',cfg()))).rejects.toMatchObject({report:{decision:'blocked_uncertain',executionRisk:'unknown'}});expect(calls).toHaveLength(1);
  });
 });
-
-
-
-// ─── isStreamInterruptError (Step 1) ─────────────────────────────────────────
-describe('isStreamInterruptError', () => {
-  it('matches stream-interrupt phrases', () => {
-    expect(isStreamInterruptError(new Error('stream closed before response.completed'))).toBe(true);
-    expect(isStreamInterruptError(new Error('stream disconnected before completion'))).toBe(true);
-    // Real log text: SDK wraps code 1 but the interrupt phrase is present.
-    expect(
-      isStreamInterruptError(
-        new Error(
-          'Codex Exec exited with code 1: Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)',
-        ),
-      ),
-    ).toBe(true);
-  });
-  it('is case-insensitive and accepts a raw string', () => {
-    expect(isStreamInterruptError('STREAM CLOSED BEFORE RESPONSE.COMPLETED')).toBe(true);
-  });
-  it('does NOT match non-interrupt errors', () => {
-    // A bare code-1 exit with no interrupt phrase must NOT be swallowed into recovery.
-    expect(isStreamInterruptError(new Error('Codex Exec exited with code 1: bad config'))).toBe(false);
-    expect(isStreamInterruptError(new Error('rate limit exceeded, retry later'))).toBe(false);
-    expect(isStreamInterruptError(new Error('thread not found'))).toBe(false);
-    expect(isStreamInterruptError(new Error('no session found'))).toBe(false);
-    expect(isStreamInterruptError(new Error('codex item error'))).toBe(false);
-  });
-});
-
-// ─── stream-interrupt recovery (Step 3) ──────────────────────────────────────
 
 
 

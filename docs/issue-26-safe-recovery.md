@@ -8,10 +8,10 @@ Implementation baseline: main b381706. The original analysis is in issue #26 and
 - SDK event text is classified only through tested, anchored patterns. A plain exit code 1 is not a transient error. Rejected JSONL and subprocess stderr are never searched for retry directives. Unknown formats remain unknown.
 - A single recovery scheduler bounds attempts, cancellable jittered backoff and elapsed time. It honors a trusted Retry-After minimum without truncating it into an early retry. Current SDK versions do not expose provider headers: the adapter does not invent them or claim it can count CLI-internal network retries.
 - New retries default off. With retries on, only a positively established pre-execution temporary failure is eligible in the current runtime (e.g. EAGAIN/EMFILE/ENFILE from OS spawn). A missing thread ID, missing tool event, read-only filesystem sandbox or same-thread continuation does not establish safe execution. SDK HTTP-shaped errors improve diagnostics but cannot establish that tools did not execute.
-- Consequently old automatic stream continuation and stale-thread fresh replay are intentionally disabled for uncertain runs, even when new retries are off. Existing thread mappings are retained for operator reconciliation rather than silently cleared. The old callback options remain source-compatible but are no longer invoked for unproven stale failures. This is a safety behavior change, not a claim of complete legacy retry compatibility.
+- Consequently old automatic stream continuation and stale-thread fresh replay are intentionally disabled for uncertain runs, even when new retries are off. Existing thread mappings are retained for operator reconciliation rather than silently cleared. Unused stale-replay callbacks and their per-turn fallback prompt assembly have been removed. This is a safety behavior change, not a claim of complete legacy retry compatibility.
 - Timeout revokes publication and propagates AbortSignal to the SDK, relay and network sends. The existing JSONL proxy forwards termination and escalates an uncooperative direct child. External commands, detached children or remote writes may outlive cancellation: the session remains quarantined instead of claiming termination or exactly-once execution.
-- Timed-out sessions reject queued/new work before routing and state mutation. Active turns left by a process crash become quarantined only after the new gateway acquires its singleton lock. TTL, /reset and restart cannot clear execution uncertainty. Normal completion revokes late callback publication as well.
-- Shutdown tracks real handlers, cancels active turns and records quarantine before closing the store. A timed-out handler's late completion cannot overwrite the quarantine or a new turn's state.
+- Uncertain timed-out sessions reject new model work; authenticated transport gates and the owner reconciliation command still run. Active turns left by a process crash become quarantined only after the new gateway acquires its singleton lock. TTL, /reset and restart cannot clear execution uncertainty. Normal completion revokes late callback publication as well.
+- Shutdown tracks real handlers, cancels active turns and records quarantine for unknown/observed execution before closing the store. Positively unstarted turns remain clean on timeout or shutdown. A timed-out handler's late completion cannot overwrite the quarantine or a new turn's state.
 
 ## Configuration
 
@@ -35,7 +35,7 @@ The unrestricted shell/MCP runtime offers no enforceable read-only capability pr
 
 ## Delivery and storage
 
-The successful #15 output selection modes and capped delivery/history text remain unchanged. Output is selected once, stored in `turn_outputs` before sending and split into fixed payloads/keys persisted atomically in `delivery_parts`. Credentials are excluded from stored delivery payloads. Normal message contents use the existing protected SQLite directory and seven-day retention; /reset deletes the outbox contents along with session history. Execution tombstones contain no message contents and are retained until reconciliation.
+The successful #15 output selection modes and capped delivery/history text remain unchanged. Output is selected once, stored in `turn_outputs` before sending and split into fixed payloads/keys persisted atomically in `delivery_parts`. Credentials are excluded from stored delivery payloads. Normal message contents use the existing protected SQLite directory and seven-day retention; /reset deletes the outbox contents along with session history. Execution tombstones contain no message contents. Active/quarantined evidence survives retention; sufficiently old clean tombstones can expire. Startup logs include the paused-session count.
 
 Every attempted part is first marked unknown. Only a positive signed-int64 message ID, with no conflicting returned client key, is confirmed. A send exception, empty response, malformed ID or cancellation after submission cannot count as delivered. Later parts stop at uncertainty. Confirmed completion commits assistant history idempotently by turn ID; failures at delivery or history commit never invoke the model again.
 
@@ -53,13 +53,23 @@ Do not copy message content, signed URLs or credentials into diagnostic logs.
 
 ## Releasing an execution quarantine
 
-First stop the gateway, then confirm that relevant managed execution has stopped and reconcile any external effects. Restarting the gateway alone does not do that. After verification, use the matching session and turn IDs:
+First confirm that the task's managed execution has stopped and check any external effects. Cancellation, promise settlement, missing tool events, reset and restart are not external-effect verification.
+
+The registered Octo owner can recover the affected session in-process:
+
+```text
+/reconcile TURN_ID --external-results-verified
+```
+
+The command passes the normal transport, mention and rate-limit gates, uses registration/transport identity rather than display names or message claims, and runs inside the session queue before the quarantine gate. It does not create a new model turn. It verifies the exact session/turn pair and rejects a retained local handler; database state is authoritative so an offline release cannot be shadowed by an old memory cache. Group commands must mention the bot unless server policy permits no-mention replies. This acknowledgement releases admission for new messages only: it does not replay, resend, mark old output delivered, or reconcile external systems itself.
+
+The offline helper remains available for operator maintenance. Stop the gateway first and use the matching identifiers:
 
 ```sh
 node dist/reconcile-turn.js /absolute/path/to/data/cc-octo.db SESSION_KEY TURN_ID --external-results-verified
 ```
 
-The offline helper takes the same O_EXCL gateway.lock in the database directory, refuses any existing lock, and updates only the matching quarantined row. It never starts a model/tool, clears history or automatically reconciles external systems. A wrong ID or missing acknowledgment fails. Start the gateway again afterwards. Do not remove an existing live lock to bypass the refusal.
+It uses the gateway's O_EXCL lock, refuses any existing lock and changes only the exact quarantined row. Restart after offline maintenance. Never remove a live lock to bypass the check. Neither path clears conversation history.
 
 ## Verification requirements and limits
 

@@ -2,6 +2,7 @@
  * Session Router — routing + concurrency control + mention gate + rate limiting.
  */
 
+import { isOwnerSender } from './sender-context.js';
 import { diagnosticId } from './agent-failure.js';
 import { TurnContext, type TurnLedger } from './turn-context.js';
 import type { Config } from './config.js';
@@ -35,7 +36,7 @@ export interface RouteResult {
    * so the type doesn't suggest a wider contract than the code provides.
    * Add more reasons here when corresponding emit sites land.
    */
-  rejectionReason?: 'rate_limited' | 'oversized' | 'quarantined';
+  rejectionReason?: 'rate_limited' | 'oversized' | 'quarantined' | 'control';
 }
 
 interface TokenBucket {
@@ -73,7 +74,7 @@ export class SessionRouter {
   private readonly turns = new Map<TurnContext, string>();
   private stopping = false;
   private readonly quarantineNotices = new Map<string, number>();
-  private readonly quarantined = new Set<string>();
+  private readonly quarantined = new Map<string, string>();
   private readonly ledger?: TurnLedger;
   private readonly conversationMarkdown: ConversationMarkdown;
 
@@ -165,16 +166,28 @@ export class SessionRouter {
     const key = this.sessionKey(msg);
     return this.withSessionLock(key, async () => {
       if (this.stopping) return null;
-      if (this.quarantined.has(key) || this.ledger?.isTurnQuarantined(key)) {
+      const result = await this.processMessage(msg, key);
+      if (!result || !result.shouldProcess) return result;
+      if (this.stopping) return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
+      // Control commands pass the normal transport/mention/rate gates but do not
+      // enter the model or begin a new execution generation.
+      if (await this.handleReconciliation(result)) {
+        return { ...result, shouldProcess:false, rejectionReason:'control' };
+      }
+      // SQLite is authoritative when present: an offline release must not be
+      // shadowed forever by the router's in-memory quarantine cache.
+      const quarantinedId = this.ledger
+        ? this.ledger.getQuarantinedTurnId(key)
+        : this.quarantined.get(key);
+      if (quarantinedId) {
         const lastNotice = this.quarantineNotices.get(key);
         if (lastNotice === undefined || Date.now() - lastNotice >= 60_000) {
+          if (this.quarantineNotices.size >= 1000) this.quarantineNotices.delete(this.quarantineNotices.keys().next().value!);
           this.quarantineNotices.set(key, Date.now());
-          await this.replySafe(msg, '⚠️ 上次任务的执行状态尚未确认，本会话已暂停新任务，请先核对结果。');
+          await this.replySafe(msg, `⚠️ 上次任务的执行状态尚未确认，本会话暂停新任务。编号 ${quarantinedId}。核对已执行的操作后，由注册主人发送 /reconcile ${quarantinedId} --external-results-verified 即可恢复；不会重跑旧任务。`);
         }
-        return { sessionKey:key, shouldProcess:false, message:msg, rejectionReason:'quarantined' };
+        return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
       }
-      const result = await this.processMessage(msg, key);
-      if (this.stopping) return { sessionKey:key, shouldProcess:false, message:msg, rejectionReason:'quarantined' };
       if (result && result.shouldProcess) {
         await this.runHandlerWithTimeout(result, handler);
       }
@@ -186,8 +199,8 @@ export class SessionRouter {
   async stopTurns(graceMs = 5000): Promise<void> {
     this.stopping = true;
     for (const [turn, session] of this.turns) {
-      turn.cancel(); this.quarantined.add(session);
-      this.ledger?.finishTurn(session, turn.turnId, 'quarantined');
+      turn.cancel();
+      this.finishCancelledTurn(session, turn);
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([Promise.allSettled([...this.executions]), new Promise<void>(resolve => { timer = setTimeout(resolve, graceMs); })]);
@@ -211,7 +224,7 @@ export class SessionRouter {
       this.executions.delete(task); this.turns.delete(turn);
       turn.revoke();
       if (!turn.signal.aborted) {
-        if (turn.needsReconciliation) this.quarantined.add(result.sessionKey);
+        if (turn.needsReconciliation && !this.ledger) this.quarantined.set(result.sessionKey, turn.turnId);
         this.ledger?.finishTurn(result.sessionKey, turn.turnId, turn.needsReconciliation ? 'quarantined' : 'clean');
       }
     });
@@ -226,15 +239,46 @@ export class SessionRouter {
       }));
       await Promise.race(waits);
       if (timedOut && !this.stopping) {
-        this.quarantined.add(result.sessionKey);
-        this.ledger?.finishTurn(result.sessionKey, turn.turnId, 'quarantined');
-        await this.replySafe(result.message, `⚠️ 任务超时，已请求停止执行；本会话暂停新任务，等待核对。编号 ${turn.turnId}`);
+        this.finishCancelledTurn(result.sessionKey, turn);
+        await this.replySafe(result.message, turn.executionRisk === 'proven_not_started' ? `⚠️ 任务超时，模型执行未启动；可以发送新任务。编号 ${turn.turnId}` : `⚠️ 任务超时，已请求停止执行；本会话暂停新任务。编号 ${turn.turnId}。核对操作结果后由注册主人发送 /reconcile ${turn.turnId} --external-results-verified 恢复。`);
       } else if (turn.signal.aborted && !this.stopping) {
-        this.quarantined.add(result.sessionKey);
-        this.ledger?.finishTurn(result.sessionKey, turn.turnId, 'quarantined');
-        await this.replySafe(result.message, `⚠️ 任务已取消或超时；执行状态待核对，本会话暂停新任务。编号 ${turn.turnId}`);
+        this.finishCancelledTurn(result.sessionKey, turn);
+        await this.replySafe(result.message, turn.executionRisk === 'proven_not_started' ? `⚠️ 任务已取消，模型执行未启动；可以发送新任务。编号 ${turn.turnId}` : `⚠️ 任务已取消或超时；本会话暂停新任务。编号 ${turn.turnId}。核对操作结果后由注册主人发送 /reconcile ${turn.turnId} --external-results-verified 恢复。`);
       }
     } finally { if (timeout) clearTimeout(timeout); turn.signal.removeEventListener('abort',onAbort); }
+  }
+
+  private finishCancelledTurn(session: string, turn: TurnContext): void {
+    const uncertain = turn.executionRisk !== 'proven_not_started';
+    if (uncertain && !this.ledger) this.quarantined.set(session, turn.turnId);
+    this.ledger?.finishTurn(session, turn.turnId, uncertain ? 'quarantined' : 'clean');
+  }
+
+  /** Runs under the session queue before quarantine, and never invokes a model. */
+  private async handleReconciliation(result: RouteResult): Promise<boolean> {
+    const { message: msg, sessionKey: key, cleanContent } = result;
+    if (msg.payload.type !== MessageType.Text || this.isCronFire(msg)) return false;
+    const body = cleanContent?.trim() ?? '';
+    if (!/^\/reconcile(?:\s|$)/i.test(body)) return false;
+    // Use transport identity and registration binding; body claims cannot grant access.
+    if (!isOwnerSender(msg, this.getOwnerUid())) {
+      await this.replySafe(msg, '仅注册主人可以核对并恢复本会话。');
+      return true;
+    }
+    const match = /^\/reconcile ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) --external-results-verified$/i.exec(body);
+    if (!match) {
+      await this.replySafe(msg, '核对已执行操作后，发送 /reconcile <任务编号> --external-results-verified 恢复会话；不会重跑旧任务。');
+      return true;
+    }
+    if ([...this.turns.values()].includes(key)) {
+      await this.replySafe(msg, '原任务仍在停止处理中，暂时不能恢复，请稍后再试。');
+      return true;
+    }
+    const id = match[1].toLowerCase();
+    const released = this.ledger ? this.ledger.reconcileTurn(key, id) : this.quarantined.get(key) === id;
+    if (released) { this.quarantined.delete(key); this.quarantineNotices.delete(key); }
+    await this.replySafe(msg, released ? '✓ 本会话已恢复，没有重跑旧任务。可以发送新消息。' : '任务编号与本会话的暂停记录不匹配，请检查编号。');
+    return true;
   }
 
   async route(msg: BotMessage): Promise<RouteResult | null> {

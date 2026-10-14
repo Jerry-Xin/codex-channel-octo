@@ -19,7 +19,7 @@ const message:BotMessage={message_id:'1',message_seq:1,from_uid:'user',channel_i
 describe('durable lifecycle quarantine',()=>{
  it('cancels a timed-out handler and blocks the next message before routing or publication',async()=>{
   const router=new SessionRouter(config,'bot','',store);let release!:()=>void;let turn!:TurnContext;const late=vi.fn();
-  await router.routeAndHandle(message,async(_result,ctx)=>{turn=ctx;await new Promise<void>(r=>{release=r;});ctx.guard({publish:late}).publish();});
+  await router.routeAndHandle(message,async(_result,ctx)=>{turn=ctx;ctx.executionRisk='unknown';await new Promise<void>(r=>{release=r;});ctx.guard({publish:late}).publish();});
   expect(turn.signal.aborted).toBe(true);expect(store.isTurnQuarantined('user')).toBe(true);
   const next=vi.fn();const result=await router.routeAndHandle({...message,message_id:'2'},next);expect(next).not.toHaveBeenCalled();expect(result?.rejectionReason).toBe('quarantined');
   release();await new Promise(r=>setTimeout(r,0));expect(late).not.toHaveBeenCalled();expect(store.isTurnQuarantined('user')).toBe(true);
@@ -38,7 +38,7 @@ describe('durable lifecycle quarantine',()=>{
  });
  it('shutdown settles the dispatch gate even when a handler ignores abort and timeouts are disabled',async()=>{
   const router=new SessionRouter({...config,dispatchTimeoutMs:0},'bot','',store);let started=false;
-  const dispatch=router.routeAndHandle(message,async()=>{started=true;await new Promise<void>(()=>{});});
+  const dispatch=router.routeAndHandle(message,async(_r,t)=>{started=true;t.executionRisk='unknown';await new Promise<void>(()=>{});});
   await vi.waitFor(()=>expect(started).toBe(true));await router.stopTurns(1);await dispatch;expect(store.isTurnQuarantined('user')).toBe(true);
  });
  it('an older completion cannot overwrite the next generation',()=>{
@@ -46,7 +46,7 @@ describe('durable lifecycle quarantine',()=>{
  });
  it('shutdown revokes callbacks and quarantines even if the handler ignores cancellation',async()=>{
   const router=new SessionRouter({...config,dispatchTimeoutMs:1000},'bot','',store);let release!:()=>void;let turn!:TurnContext;
-  const task=router.routeAndHandle(message,async(_r,t)=>{turn=t;await new Promise<void>(r=>{release=r;});});
+  const task=router.routeAndHandle(message,async(_r,t)=>{turn=t;t.executionRisk='unknown';await new Promise<void>(r=>{release=r;});});
   await vi.waitFor(()=>expect(turn).toBeDefined());await router.stopTurns(1);expect(turn.signal.aborted).toBe(true);expect(store.isTurnQuarantined('user')).toBe(true);
   release();await task;expect(store.isTurnQuarantined('user')).toBe(true);
  });
@@ -89,3 +89,16 @@ describe('delivery outcome and outbox',()=>{
   const {turn}=await deliver('private answer');store.beginTurn('s',turn.turnId);store.finishTurn('s',turn.turnId,'quarantined');store.deleteSession('s');expect(adapter.prepare('SELECT * FROM turn_outputs').all()).toEqual([]);expect(adapter.prepare('SELECT * FROM delivery_parts').all()).toEqual([]);expect(store.isTurnQuarantined('s')).toBe(true);
  });
 });
+
+ describe('execution evidence retention', () => {
+  it('prunes only completed old tombstones and reports unresolved inventory', () => {
+    store.beginTurn('done','done-id');store.finishTurn('done','done-id','clean');
+    store.beginTurn('paused','paused-id');store.finishTurn('paused','paused-id','quarantined');
+    store.beginTurn('active','active-id');
+    adapter.prepare('UPDATE turn_execution SET updated_at=0').run();
+    expect(store.quarantinedTurnCount()).toBe(1);store.cleanExpired();
+    expect(store.getQuarantinedTurnId('done')).toBeUndefined();
+    expect(adapter.prepare("SELECT state FROM turn_execution WHERE session_key='done'").get()).toBeUndefined();
+    expect(store.getQuarantinedTurnId('paused')).toBe('paused-id');expect(store.getQuarantinedTurnId('active')).toBe('active-id');
+  });
+ });

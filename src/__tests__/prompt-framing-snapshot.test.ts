@@ -76,7 +76,7 @@ describe('T26: framing remains byte-identical to main on a successful run', () =
  });
  it('never emits fallback or continuation prompts when execution is uncertain',async()=>{
   scriptedRuns=[async function*(){throw new Error(interrupt);}];
-  await expect(drain({resume:'old',fallbackRetryPrompt:'FALLBACK BODY'})).rejects.toThrow();
+  await expect(drain({resume:'old'})).rejects.toThrow();
   expect(prompts).toHaveLength(1);expect(prompts[0]).not.toContain('FALLBACK BODY');
  });
 });

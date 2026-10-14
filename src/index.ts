@@ -228,6 +228,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     // no message can arrive before the handler below is installed.
     await gateway.register();
     store.recoverInterruptedTurns();
+    console.log(`[codex-channel-octo] quarantined sessions=${store.quarantinedTurnCount()}`);
     console.log(`[codex-channel-octo] ${label}Bot registered: id=${gateway.botId}`);
 
     // #86: prefetch the media CDN host (best-effort). Octo serves media from a
@@ -661,10 +662,7 @@ export async function handleMessage(
           escapeSectionMarkers(historyPrefix) +
           '\n---\n'
         : '';
-      // First turn (no SDK session yet): inject history once for continuity. Later
-      // turns inject nothing — `resume` carries it. The same history block is also
-      // pre-assembled (below) into `fallbackRetryPrompt` so a stale-resume recovery
-      // (retry without resume) can re-inject it instead of losing the conversation.
+      // Inject history once on a new thread; a resumed thread already owns it.
       const firstTurnHistory = isFirstTurn ? historyBlock : '';
 
       // Assemble the final user message: one-time history + group-context delta +
@@ -690,22 +688,6 @@ export async function handleMessage(
         MAX_USER_LLM_BYTES,
         serverMd?.context,
       );
-
-      // Pre-assemble the stale-resume RETRY prompt here, where `historyBlock` and
-      // `userBody` are still SEPARATE. The retry recovers a dead SDK session, so
-      // (like a first turn) it reinjects the prior history as read-only background
-      // with the current message anchored ONCE after it. We must build it here and
-      // NOT let queryAgent re-run assembleUserMessage on the already-assembled
-      // `userContentForLLM` — doing so would double-anchor and, in a group turn,
-      // push the [Recent group messages] delta AFTER the first [Current message]
-      // anchor, reviving #132 on the recovery path (PR #133 review: Jerry-Xin /
-      // Steve / yujiawei, all reproduced). Assembled the same way as a first turn:
-      // history is the context, userBody is the anchored body — one clean anchor.
-      // Only built when resuming — it's the sole consumer (sessionOpts below), so a
-      // first turn (no resume) would otherwise assemble it just to discard it.
-      const fallbackRetryPrompt = resume
-        ? assembleUserMessage(historyBlock, userBody, MAX_USER_LLM_BYTES, serverMd?.retryContext)
-        : undefined;
 
       // --- Query agent with structural role separation (Q3 fix) ---
       // userContentForLLM → user role (prompt), history + context → system role (systemPrompt)
@@ -763,12 +745,6 @@ export async function handleMessage(
             serverMd.commit(id);
           }
         },
-        ...(resume
-          ? {
-              onResumeFailed: () => { turn.assertPublishable(); turnStore.clearSdkSessionId(sessionKey); },
-              fallbackRetryPrompt,
-            }
-          : {}),
       };
 
       // GROUP.md: inject operator-provided per-group instructions (from
@@ -895,7 +871,7 @@ export async function handleMessage(
   // next legitimate turn — the rate limit reply went out but the content
   // still landed in [Group context]. Ordinary unmentioned chatter still
   // caches, but control events must never become conversation context.
-  const SUPPRESS_GROUP_CACHE = new Set(['rate_limited', 'oversized', 'quarantined']);
+  const SUPPRESS_GROUP_CACHE = new Set(['rate_limited', 'oversized', 'quarantined', 'control']);
   const suppressGroupCache =
     !!routeResult?.rejectionReason && SUPPRESS_GROUP_CACHE.has(routeResult.rejectionReason);
 

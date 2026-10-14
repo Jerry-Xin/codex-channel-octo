@@ -3,7 +3,7 @@ import { safeSenderMetadata, type SafeText } from './prompt-safety.js';
 import { isRegistrationOwner, normalizeOwnerUid, transportSpaceId } from './owner-identity.js';
 import { parentGroupNo } from './channel-id.js';
 
-export function buildSenderContext(message: BotMessage, ownerUid: string): SafeText {
+function senderMetadata(message: BotMessage, ownerUid: string) {
   const senderUid = normalizeOwnerUid(message.from_uid);
   const channelId = typeof message.channel_id === 'string' && message.channel_id.length > 0
     && message.channel_id.length <= 512 ? message.channel_id : null;
@@ -23,5 +23,13 @@ export function buildSenderContext(message: BotMessage, ownerUid: string): SafeT
     is_owner: isRegistrationOwner(senderUid, ownerUid)
       || (matchesChannel && isRegistrationOwner(senderUid, ownerUid, senderSpace)),
   };
-  return safeSenderMetadata(metadata);
+  return metadata;
+}
+
+/** Uses only transport fields and the registered owner binding, never body text. */
+export function isOwnerSender(message: BotMessage, ownerUid: string): boolean {
+  return senderMetadata(message, ownerUid).is_owner;
+}
+export function buildSenderContext(message: BotMessage, ownerUid: string): SafeText {
+  return safeSenderMetadata(senderMetadata(message, ownerUid));
 }

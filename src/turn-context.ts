@@ -30,6 +30,8 @@ export class TurnContext {
 }
 export interface TurnLedger {
   isTurnQuarantined(session: string): boolean;
+  getQuarantinedTurnId(session: string): string | undefined;
+  reconcileTurn(session: string, turnId: string): boolean;
   beginTurn(session: string, turnId: string): number;
   finishTurn(session: string, turnId: string, state: 'clean' | 'quarantined'): void;
 }

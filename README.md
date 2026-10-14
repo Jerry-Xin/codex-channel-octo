@@ -204,4 +204,12 @@ Apache-2.0
 
 ### Safe failure handling and recovery
 
-Failures now carry a safe diagnostic ID and category. Timeouts cancel the turn and quarantine its session; a missing tool event is not proof that nothing executed. Optional `sdk.recovery` retries are disabled by default and currently limited to proven pre-execution temporary failures. Delivery/storage errors never replay the model task. See [recovery configuration, delivery behavior and offline reconciliation](docs/issue-26-safe-recovery.md).
+Failures carry a safe diagnostic ID and category. A model/stream failure can pause the conversation even without visible tool events: absence of events does not prove non-execution. Timeouts or shutdown before model execution starts do not create an execution quarantine. Unknown or observed effects remain paused; `/reset` and restart cannot waive that uncertainty.
+
+After checking the prior task's effects, the **registered Octo owner** can recover only the affected conversation while the bot stays online:
+
+```text
+/reconcile <turn-id> --external-results-verified
+```
+
+The pause notice includes the exact turn ID. In groups, @mention the bot before the command. A wrong ID, non-owner, or still-running local handler cannot release the pause. Recovery never replays the old task or clears history. Ordinary transport, mention and rate limits still apply. Optional `sdk.recovery` is disabled by default and only retries positively established pre-execution temporary failures. See [the detailed recovery and offline maintenance guide](docs/issue-26-safe-recovery.md).
