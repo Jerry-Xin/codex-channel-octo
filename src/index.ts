@@ -847,6 +847,7 @@ export async function handleMessage(
         decision: 'not_attempted' as const, executionRisk: turn.executionRisk,
         first: { ...classifyFailure(err), stage: err instanceof AgentFailure ? err.snapshot.stage : stage }, final: { ...classifyFailure(err), stage: err instanceof AgentFailure ? err.snapshot.stage : stage },
       };
+      turn.stage = failure.final.stage;
       if (failure.executionRisk !== 'proven_not_started' && ['inference','jsonl_parse','process_exit'].includes(failure.final.stage)) turn.needsReconciliation = true;
       console.error('[codex-channel-octo] turn failed', JSON.stringify(failure));
       const content = failureReply(failure);

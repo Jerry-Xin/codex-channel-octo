@@ -97,10 +97,31 @@ describe('user-authored turns after interrupted work',()=>{
     await router.routeAndHandle(message('next'),next);
     expect(store.getQuarantinedTurnId('owner')).toBe('different-turn');expect(next).not.toHaveBeenCalled();
   });
+  it('a new request admitted by delayed proof still pays the latest global model budget',async()=>{
+    let now=Date.now();const clock=vi.spyOn(Date,'now').mockImplementation(()=>now);
+    try{
+      const limited=new SessionRouter({...config,rateLimit:{maxPerMinute:1}},'bot','owner',store);const execution=proof(false);
+      await limited.routeAndHandle(message('first'),async(_r,t)=>{t.executionRisk='unknown';t.interruption='failed';t.registerExecution(execution);});
+      now+=60000;
+      for(let i=0;i<10;i++)await limited.routeAndHandle({...message('fill budget'),from_uid:`other-${i}`},async()=>{});
+      execution.waitForStopped.mockResolvedValue(true);const next=vi.fn();
+      const result=await limited.routeAndHandle(message('next'),next);
+      expect(result?.rejectionReason).toBe('rate_limited');expect(next).not.toHaveBeenCalled();
+      expect(store.isTurnQuarantined('owner')).toBe(false);
+    }finally{clock.mockRestore();}
+  });
   it('does not delete or claim external reconciliation for a consumed interruption record',async()=>{
     let id='';await router.routeAndHandle(message('first'),async(_r,t)=>{id=t.turnId;t.executionRisk='effects_observed';t.interruption='failed';t.registerExecution(proof());});
     await router.routeAndHandle(message('next'),async()=>{});store.deleteSession('owner');
     const connection=createAdapter(join(root,'db'));
     try{expect(connection.prepare('SELECT reason,execution_risk,context_pending FROM interrupted_turns WHERE turn_id=?').get(id)).toEqual({reason:'failed',execution_risk:'effects_observed',context_pending:0});}finally{connection.close();}
+  });
+  it('a handler finishing after shutdown cannot write through the closed ledger',async()=>{
+    let finish!:()=>void;let started=false;const execution=proof();
+    const dispatch=router.routeAndHandle(message('first'),async(_r,t)=>{t.executionRisk='unknown';t.registerExecution(execution);started=true;await new Promise<void>(resolve=>{finish=resolve;});});
+    await vi.waitFor(()=>expect(started).toBe(true));await router.stopTurns(1);await dispatch;
+    store.close();store=new SessionStore(createAdapter(join(root,'db')));store.init();
+    finish();await vi.waitFor(()=>expect(execution.dispose).toHaveBeenCalledOnce());
+    expect(store.isTurnQuarantined('owner')).toBe(true);
   });
 });

@@ -170,14 +170,8 @@ export class SessionRouter {
     const key = this.sessionKey(msg);
     return this.withSessionLock(key, async () => {
       if (this.stopping) return null;
-      const result = await this.processMessage(msg, key, true);
-      if (!result || !result.shouldProcess) return result;
-      if (this.stopping) return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
-      // Control commands pass transport/mention and session/user rate gates but do not
-      // enter the model or begin a new execution generation.
-      if (await this.handleReconciliation(result)) {
-        return { ...result, shouldProcess:false, rejectionReason:'control' };
-      }
+      // Cleanup is independent of the sender; finish it before computing
+      // admission limits so a newly unblocked model turn pays the global budget.
       const pending = this.pendingCleanup.get(key);
       if (pending) {
         const blocked = this.ledger ? this.ledger.getQuarantinedTurnId(key) : this.quarantined.get(key);
@@ -187,6 +181,14 @@ export class SessionRouter {
           this.ledger?.finishTurn(key,pending.turnId,'clean');
           this.quarantined.delete(key); this.quarantineNotices.delete(key); this.pendingCleanup.delete(key);
         }
+      }
+      const result = await this.processMessage(msg, key, true);
+      if (!result || !result.shouldProcess) return result;
+      if (this.stopping) return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
+      // Control commands pass transport/mention and session/user rate gates but do not
+      // enter the model or begin a new execution generation.
+      if (await this.handleReconciliation(result)) {
+        return { ...result, shouldProcess:false, rejectionReason:'control' };
       }
       // SQLite is authoritative when present: an offline release must not be
       // shadowed forever by the router's in-memory quarantine cache.
@@ -243,6 +245,7 @@ export class SessionRouter {
     }).finally(async () => {
       turn.revoke();
       try {
+        if (this.lifecycleClosed) { await turn.waitForStopped(CLEANUP_WAIT_MS); return; }
         const interrupted = turn.interruption ?? (turn.signal.aborted ? 'cancelled' : turn.needsReconciliation ? 'failed' : undefined);
         if (interrupted) {
           this.ledger?.recordInterruption(result.sessionKey, {turnId:turn.turnId,reason:interrupted,executionRisk:turn.executionRisk,stage:turn.stage});
