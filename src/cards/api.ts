@@ -1284,7 +1284,9 @@ export function createCardApi(config: CardApiConfig): CardApi {
     },
 
     async getFreshMembers(groupNo: string, opts?: ApiCallOptions): Promise<readonly GroupMemberRef[]> {
+      // `.` and `..` survive encodeURIComponent and would be normalized away as dot segments.
       if (typeof groupNo !== "string" || groupNo.trim() === "" || groupNo.length > 256
+        || groupNo === "." || groupNo === ".."
         || CONTROL_CHARS.test(groupNo) || LONE_SURROGATE.test(groupNo)) {
         throw new CardRequestError("invalid_request", "group_no");
       }

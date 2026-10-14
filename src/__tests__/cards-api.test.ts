@@ -170,6 +170,32 @@ describe("wire serialization", () => {
     expect(calls).toBe(0);
   });
 
+  it.each([".", ".."])("rejects dot-segment membership identifier %j as invalid_request before transport", async (groupNo) => {
+    const { client, calls } = api(() => json(200, { members: [{ uid: "u1" }] }));
+    const err = await failure(client.getFreshMembers(groupNo));
+    expect(err).toBeInstanceOf(CardRequestError);
+    expect(err).toMatchObject({ code: "invalid_request", field: "group_no" });
+    expect(err.message).toBe("card api request rejected: invalid_request (group_no)");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("encodes ordinary membership identifiers including slash, spaces, Unicode and literal %2e as one segment", async () => {
+    const cases: [string, string][] = [
+      ["grp/1", "grp%2F1"],
+      ["team alpha", "team%20alpha"],
+      ["研发 组", "%E7%A0%94%E5%8F%91%20%E7%BB%84"],
+      ["équipe", "%C3%A9quipe"],
+      ["%2e", "%252e"],
+      ["%2e%2e", "%252e%252e"],
+    ];
+    const { client, calls } = api(() => json(200, { members: [{ uid: "u1" }] }));
+    for (const [groupNo, segment] of cases) {
+      expect(await client.getFreshMembers(groupNo)).toEqual([{ uid: "u1" }]);
+      expect(calls.at(-1)?.url).toBe(`https://api.example.com/base/v1/bot/groups/${segment}/members`);
+    }
+    expect(calls).toHaveLength(cases.length);
+  });
+
   it("rejects invalid routes, identities and oversized envelopes before transport", () => {
     expect(() => serializeSendRegistry({ route: { channelId: "", channelType: 2 }, clientMsgNo: CLIENT, ref: REF, state: "reasoning", data: DATA })).toThrow(/channel_id/);
     expect(() => serializeSendRegistry({ route: { channelId: "g", channelType: 3 as 2 }, clientMsgNo: CLIENT, ref: REF, state: "reasoning", data: DATA })).toThrow(/channel_type/);
@@ -655,5 +681,130 @@ describe("bounded authored-card projection", () => {
       expect((err as Error).message).not.toContain(marker);
       expect((err as CardRequestError).field).toBe("body.type");
     }
+  });
+});
+
+describe("acknowledged identities are exact integer tokens", () => {
+  // Each token is a non-integral (or inexact) JSON number that IEEE-754
+  // rounds to `rounded`. The rounded value is supplied as the matching
+  // identity, so only exact-token checking can refuse the acknowledgement.
+  const ROUNDED_IDS = [
+    { name: "fraction just above one", token: "1.0000000000000001", rounded: "1" },
+    { name: "fraction above max safe integer", token: "9007199254740991.1", rounded: "9007199254740991" },
+    { name: "exponent form of a fraction", token: "1.0000000000000001e0", rounded: "1" },
+    { name: "uppercase signed exponent", token: "1.0000000000000001E+0", rounded: "1" },
+    { name: "fraction just below one", token: "0.99999999999999999", rounded: "1" },
+    { name: "fraction rounding up to max safe integer", token: "9007199254740990.9", rounded: "9007199254740991" },
+    { name: "positive exponent rounding to ten", token: "1.00000000000000001e1", rounded: "10" },
+    { name: "negative exponent rounding to one", token: "100000000000000001e-17", rounded: "1" },
+    { name: "sub-one mantissa rounding up via exponent", token: "9.9999999999999999e-1", rounded: "1" },
+  ] as const;
+
+  const CANONICAL_IDS = [
+    { name: "safe integer", token: "1", id: "1" },
+    { name: "max safe integer", token: "9007199254740991", id: "9007199254740991" },
+    { name: "raw int64", token: BIG_ID, id: BIG_ID },
+    { name: "string int64", token: `"${BIG_ID}"`, id: BIG_ID },
+  ] as const;
+
+  const EXACT_INTEGRAL_IDS = [
+    { name: "trailing zero fraction", token: "1.0", id: "1" },
+    { name: "zero exponent", token: "1e0", id: "1" },
+    { name: "negative exponent", token: "10e-1", id: "1" },
+    { name: "fractional mantissa", token: "0.1e1", id: "1" },
+    { name: "max safe integer with zero fraction", token: "9007199254740991.0", id: "9007199254740991" },
+    { name: "max safe integer via negative exponent", token: "90071992547409910e-1", id: "9007199254740991" },
+  ] as const;
+
+  const ROUNDED_SEQS = [
+    { name: "fraction above", token: "3.0000000000000001", rounded: 3 },
+    { name: "fraction below", token: "2.9999999999999999", rounded: 3 },
+    { name: "exponent form", token: "3.0000000000000001e0", rounded: 3 },
+    { name: "negative exponent", token: "30000000000000001e-16", rounded: 3 },
+  ] as const;
+
+  const EXACT_SEQS = [
+    { name: "integer", token: "3" },
+    { name: "trailing zero fraction", token: "3.0" },
+    { name: "zero exponent", token: "3e0" },
+    { name: "fractional mantissa", token: "0.3e1" },
+  ] as const;
+
+  const IDENTITY_REJECTIONS = ["missing_identity", "malformed_response"];
+  const SEQ_REJECTIONS = ["malformed_response", "identity_mismatch", "missing_identity"];
+
+  const sendRegistry = (body: string) => api(() => json(200, body)).client.sendRegistry({
+    route: ROUTE, clientMsgNo: CLIENT, ref: REF, state: "reasoning", data: DATA,
+  });
+  const sendAuthored = (body: string) => api(() => json(200, body)).client.sendAuthored({
+    route: ROUTE, clientMsgNo: CLIENT, profile: "octo/v1", card: DISPLAY_CARD, plain: "Report",
+  });
+  const editRegistry = (body: string, messageId: string, seq = 4) => api(() => json(200, body)).client.editRegistry({
+    route: ROUTE, messageId, ref: REF, state: "reasoning", data: DATA, seq, transient: true,
+  });
+  const editAuthored = (body: string, messageId: string, seq = 4) => api(() => json(200, body)).client.editAuthored({
+    route: ROUTE, messageId, profile: "octo/v1", card: DISPLAY_CARD, plain: "Report", seq, transient: false,
+  });
+  const sendAck = (token: string) => `{"message_id":${token},"client_msg_no":"${CLIENT}"}`;
+
+  async function settle<T>(p: Promise<T>): Promise<{ ack: T } | { err: unknown }> {
+    return p.then((ack) => ({ ack }), (err: unknown) => ({ err }));
+  }
+
+  async function expectRefused(p: Promise<unknown>, codes: readonly string[]): Promise<void> {
+    const outcome = await settle(p);
+    expect(outcome).not.toHaveProperty("ack");
+    const err = (outcome as { err: unknown }).err;
+    expect(err).toBeInstanceOf(OctoApiError);
+    expect(codes).toContain((err as OctoApiError).code);
+  }
+
+  it.each(ROUNDED_IDS)("rounded fixtures really round to the matching identity: $token", ({ token, rounded }) => {
+    expect(Number(token)).toBe(Number(rounded));
+    expect(Number.isSafeInteger(Number(token))).toBe(true);
+  });
+
+  it.each(ROUNDED_IDS)("sendRegistry refuses rounded message_id $token ($name)", async ({ token }) => {
+    await expectRefused(sendRegistry(sendAck(token)), IDENTITY_REJECTIONS);
+  });
+
+  it.each(ROUNDED_IDS)("sendAuthored refuses rounded message_id $token ($name)", async ({ token }) => {
+    await expectRefused(sendAuthored(sendAck(token)), IDENTITY_REJECTIONS);
+  });
+
+  it.each(ROUNDED_IDS)("editRegistry refuses rounded message_id $token echoed for $rounded ($name)", async ({ token, rounded }) => {
+    await expectRefused(editRegistry(`{"message_id":${token}}`, rounded), IDENTITY_REJECTIONS);
+  });
+
+  it.each(ROUNDED_IDS)("editAuthored refuses rounded message_id $token echoed for $rounded ($name)", async ({ token, rounded }) => {
+    await expectRefused(editAuthored(`{"message_id":${token}}`, rounded), IDENTITY_REJECTIONS);
+  });
+
+  it.each([...CANONICAL_IDS, ...EXACT_INTEGRAL_IDS])("send and edit acknowledge exact message_id $token ($name)", async ({ token, id }) => {
+    expect((await sendRegistry(sendAck(token))).messageId).toBe(id);
+    expect((await sendAuthored(sendAck(token))).messageId).toBe(id);
+    expect(await editRegistry(`{"message_id":${token}}`, id)).toMatchObject({ messageId: id, seq: 4 });
+    expect(await editAuthored(`{"message_id":${token}}`, id)).toMatchObject({ messageId: id, seq: 4 });
+  });
+
+  it.each(ROUNDED_SEQS)("sendRegistry and sendAuthored refuse rounded message_seq $token ($name)", async ({ token, rounded }) => {
+    expect(Number(token)).toBe(rounded);
+    const body = `{"message_id":"5","client_msg_no":"${CLIENT}","message_seq":${token}}`;
+    await expectRefused(sendRegistry(body), IDENTITY_REJECTIONS);
+    await expectRefused(sendAuthored(body), IDENTITY_REJECTIONS);
+  });
+
+  it.each(ROUNDED_SEQS)("editRegistry and editAuthored refuse rounded card_seq $token ($name)", async ({ token, rounded }) => {
+    expect(Number(token)).toBe(rounded);
+    const body = `{"message_id":"5","card_seq":${token}}`;
+    await expectRefused(editRegistry(body, "5", rounded), SEQ_REJECTIONS);
+    await expectRefused(editAuthored(body, "5", rounded), SEQ_REJECTIONS);
+  });
+
+  it.each(EXACT_SEQS)("exact message_seq and card_seq $token ($name) are acknowledged", async ({ token }) => {
+    expect((await sendRegistry(`{"message_id":"5","client_msg_no":"${CLIENT}","message_seq":${token}}`)).messageSeq).toBe(3);
+    expect((await sendAuthored(`{"message_id":"5","client_msg_no":"${CLIENT}","message_seq":${token}}`)).messageSeq).toBe(3);
+    expect(await editRegistry(`{"message_id":"5","card_seq":${token}}`, "5", 3)).toMatchObject({ messageId: "5", seq: 3 });
+    expect(await editAuthored(`{"message_id":"5","card_seq":${token}}`, "5", 3)).toMatchObject({ messageId: "5", seq: 3 });
   });
 });

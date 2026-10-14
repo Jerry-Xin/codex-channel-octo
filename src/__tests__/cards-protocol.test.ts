@@ -5,6 +5,7 @@ import {
   encodeReplyFrame,
   encodeRequestFrame,
   FRAME_PREFIX_BYTES,
+  MAX_DIAG_PATH_BYTES,
   MAX_FRAME_BYTES,
   parseCardToolResult,
   parseReplyFrame,
@@ -321,5 +322,105 @@ describe("identity parsing", () => {
     expect(parseMessageIdentity(-1)).toBeNull();
     expect(parseMessageIdentity("01")).toBeNull();
     expect(parseMessageIdentity(42)).toBe("42");
+  });
+});
+
+describe("nested display diagnostics stay bounded and reply-encodable", () => {
+  /** Request-frame JSON depth limit (ARGS_LIMITS.maxDepth); every value, including leaves, counts a level. */
+  const ARGS_MAX_JSON_DEPTH = 32;
+  const MARKER = "zz_unknown_kind_marker";
+
+  const jsonDepth = (value: unknown): number => {
+    if (Array.isArray(value)) return 1 + Math.max(0, ...value.map(jsonDepth));
+    if (typeof value === "object" && value !== null) return 1 + Math.max(0, ...Object.values(value).map(jsonDepth));
+    return 1;
+  };
+
+  const WRAPPERS: Record<string, (inner: unknown) => unknown> = {
+    group: (inner) => ({ kind: "group", blocks: [inner] }),
+    collapsible: (inner) => ({ kind: "collapsible", label: "More", blocks: [inner] }),
+    columns: (inner) => ({ kind: "columns", columns: [{ blocks: [inner] }] }),
+  };
+
+  const LEAVES: Record<string, { block: unknown; rule: string }> = {
+    malformed_text: { block: { kind: "text", text: 123 }, rule: "wrong_type" },
+    missing_text: { block: { kind: "text" }, rule: "missing_field" },
+    unknown_block_kind: { block: { kind: MARKER }, rule: "unknown_kind" },
+    malformed_rich_run: { block: { kind: "rich_text", runs: [{ kind: "strong", text: 5 }] }, rule: "wrong_type" },
+    missing_rich_run_text: { block: { kind: "rich_text", runs: [{ kind: "code" }] }, rule: "missing_field" },
+    unknown_rich_run_kind: { block: { kind: "rich_text", runs: [{ kind: MARKER, text: "x" }] }, rule: "unknown_kind" },
+    missing_collapsible_label: { block: { kind: "collapsible", blocks: [] }, rule: "missing_field" },
+    malformed_collapsible_expanded: { block: { kind: "collapsible", label: "L", blocks: [], expanded: "yes" }, rule: "wrong_type" },
+    malformed_columns: { block: { kind: "columns", columns: [{ blocks: 1 }] }, rule: "wrong_type" },
+  };
+
+  const nestedArgs = (wrapper: string, levels: number, leaf: unknown): { blocks: unknown[] } => {
+    let node = leaf;
+    for (let i = 0; i < levels; i++) node = WRAPPERS[wrapper](node);
+    return { blocks: [node] };
+  };
+
+  const frameDepth = (args: unknown): number => jsonDepth({ v: 1, request_id: REQUEST_ID, authority: AUTHORITY, op: "display", args });
+
+  /** Args rejections must fit the reply grammar and survive an encode/read/parse round trip unchanged. */
+  function expectEncodableRejection(parsed: RequestParse, rule: string): void {
+    const rejected = argsRejection(parsed);
+    expect(rejected.code).toBe("validation_failed");
+    expect(rejected.diagnostics.length).toBeGreaterThan(0);
+    expect(rejected.diagnostics.map((d) => d.rule)).toContain(rule);
+    for (const d of rejected.diagnostics) {
+      expect(enc.encode(d.path).byteLength, d.path).toBeLessThanOrEqual(MAX_DIAG_PATH_BYTES);
+    }
+    expect(JSON.stringify(rejected)).not.toContain(MARKER);
+
+    const result: CardToolResult = {
+      status: "error",
+      error: { code: "validation_failed", diagnostics: rejected.diagnostics.map((d) => ({ path: d.path, rule: d.rule })) },
+    };
+    const read = readFrame(encodeReplyFrame({ v: 1, request_id: REQUEST_ID, result }));
+    expect(read.kind).toBe("frame");
+    if (read.kind !== "frame") throw new Error("expected complete reply frame");
+    expect(parseReplyFrame(read.body)).toEqual({ ok: true, frame: { v: 1, request_id: REQUEST_ID, result } });
+  }
+
+  function expectFrameDepthRejection(parsed: RequestParse): void {
+    expect(parsed).toEqual({ ok: false, stage: "frame", code: "depth_exceeded" });
+    expect(parsed).not.toHaveProperty("header");
+    expect(parsed).not.toHaveProperty("diagnostics");
+  }
+
+  it("twelve nested groups around {kind:'text',text:123} reject at args stage with a bounded, reply-encodable path", () => {
+    const args = nestedArgs("group", 12, { kind: "text", text: 123 });
+    expect(frameDepth(args)).toBeLessThanOrEqual(ARGS_MAX_JSON_DEPTH);
+    const parsed = parseRequestFrame(request("display", args));
+    expect(parsed).toMatchObject({ ok: false, stage: "args", header: { v: 1, request_id: REQUEST_ID, authority: AUTHORITY, op: "display" } });
+    expectEncodableRejection(parsed, "wrong_type");
+  });
+
+  it("fourteen nested groups exceed JSON depth and reject at frame stage without a fabricated header", () => {
+    const args = nestedArgs("group", 14, { kind: "text", text: 123 });
+    expect(frameDepth(args)).toBeGreaterThan(ARGS_MAX_JSON_DEPTH);
+    expectFrameDepthRejection(parseRequestFrame(request("display", args)));
+  });
+
+  const LEVELS: Record<string, readonly number[]> = {
+    group: [10, 11, 12, 13, 14],
+    collapsible: [10, 11, 12, 13, 14],
+    // Columns add two JSON levels per wrapper, so the path-length boundary is crossed at 6 and depth at 7-8.
+    columns: [5, 6, 7, 8, 10, 11, 12, 13, 14],
+  };
+  const CASES = Object.entries(LEVELS).flatMap(([wrapper, levels]) =>
+    levels.flatMap((level) => Object.keys(LEAVES).map((leaf) => ({ wrapper, level, leaf }))));
+
+  it.each(CASES)("$leaf inside $level nested $wrapper rejects with bounded diagnostics or at frame depth", ({ wrapper, level, leaf }) => {
+    const { block, rule } = LEAVES[leaf];
+    const args = nestedArgs(wrapper, level, block);
+    const parsed = parseRequestFrame(request("display", args));
+    if (frameDepth(args) > ARGS_MAX_JSON_DEPTH) {
+      expectFrameDepthRejection(parsed);
+      return;
+    }
+    expect(parsed).toMatchObject({ ok: false, stage: "args" });
+    expectEncodableRejection(parsed, rule);
   });
 });

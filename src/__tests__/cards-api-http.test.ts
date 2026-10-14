@@ -7,7 +7,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { classifySendFailure, createCardApi, OctoApiError, type CardApi } from "../cards/api.js";
+import { CardRequestError, classifySendFailure, createCardApi, OctoApiError, type CardApi } from "../cards/api.js";
 import type { DisplayAdaptiveCard, RegistryData } from "../cards/contracts.js";
 
 const TOKEN = "loopback_fixture_token_7f3a";
@@ -210,5 +210,53 @@ describe("card API over loopback HTTP", () => {
     const wrong = createCardApi({ apiUrl: `http://127.0.0.1:${octo.port}/base`, credential: "other_token" });
     const err = await wrong.getProfile().catch((e: unknown) => e as OctoApiError);
     expect(err).toMatchObject({ transport: "response", status: 401, code: "http_status" });
+  });
+});
+
+describe("membership path segments over a dedicated loopback server", () => {
+  async function closeServer(server: Server): Promise<void> {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+
+  async function withMembersServer(run: (api: CardApi, seen: Seen[]) => Promise<void>): Promise<void> {
+    // Answers every captured path with members, so a normalized request
+    // would be wrongly acknowledged instead of failing on a missing route.
+    const members = await startServer((_req, _body, res) => send(res, 200, JSON.stringify({ members: [{ uid: "captured" }] })));
+    try {
+      await run(createCardApi({ apiUrl: `http://127.0.0.1:${members.port}/base`, credential: TOKEN }), members.seen);
+    } finally {
+      await closeServer(members.server);
+    }
+  }
+
+  it("rejects '.' and '..' group identifiers before any normalized request reaches the server", async () => {
+    await withMembersServer(async (api, seen) => {
+      for (const groupNo of [".", ".."]) {
+        const err = await api.getFreshMembers(groupNo).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(CardRequestError);
+        expect(err).toMatchObject({ code: "invalid_request", field: "group_no" });
+      }
+      expect(seen).toEqual([]);
+    });
+  });
+
+  it("delivers slash, space, Unicode and literal %2e identifiers as one encoded segment", async () => {
+    await withMembersServer(async (api, seen) => {
+      const cases: [string, string][] = [
+        ["grp/1", "grp%2F1"],
+        ["team alpha", "team%20alpha"],
+        ["研发 组", "%E7%A0%94%E5%8F%91%20%E7%BB%84"],
+        ["%2e", "%252e"],
+        ["%2e%2e", "%252e%252e"],
+      ];
+      for (const [groupNo, segment] of cases) {
+        expect(await api.getFreshMembers(groupNo)).toEqual([{ uid: "captured" }]);
+        expect(seen.at(-1)).toMatchObject({
+          method: "GET", url: `/base/v1/bot/groups/${segment}/members`, authorization: `Bearer ${TOKEN}`,
+        });
+      }
+      expect(seen).toHaveLength(cases.length);
+    });
   });
 });

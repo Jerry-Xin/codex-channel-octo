@@ -55,7 +55,11 @@ export interface StrictJsonLimits {
    * `reject`: integer literals that lose precision fail the parse; exactly
    * representable finite author numbers retain their numeric type.
    * `preserve`: integers outside the safe range become exact decimal strings, so identity fields
-   * stay lossless and numeric fields fail their own type checks.
+   * stay lossless and numeric fields fail their own type checks. Fraction/exponent tokens whose
+   * parsed number is integer-valued but differs from the token's exact value (for example
+   * `1.0000000000000001`, `9007199254740993.0` or an underflowed `-1e-400`) keep their original
+   * token text, so a rounded number can never stand in for an identity, sequence or cursor.
+   * Exactly integral tokens such as `1.0` or `1e0` stay numbers.
    */
   readonly unsafeIntegers: "reject" | "preserve";
 }
@@ -148,10 +152,14 @@ export function parseStrictJson(text: string, limits: StrictJsonLimits): StrictJ
     const n = Number(token);
     if (!Number.isFinite(n)) fail("malformed_json");
     const isIntegerToken = m![1] === undefined && m![2] === undefined;
-    if (isIntegerToken && !Number.isSafeInteger(n)) {
-      if (limits.unsafeIntegers === "preserve") return token;
-      if (BigInt(n) !== BigInt(token)) fail("unsafe_integer");
+    if (isIntegerToken) {
+      if (!Number.isSafeInteger(n)) {
+        if (limits.unsafeIntegers === "preserve") return token;
+        if (BigInt(n) !== BigInt(token)) fail("unsafe_integer");
+      }
+      return n;
     }
+    if (limits.unsafeIntegers === "preserve" && Number.isInteger(n) && !isExactIntegralToken(token, n)) return token;
     return n;
   };
 
@@ -211,6 +219,40 @@ export function parseStrictJson(text: string, limits: StrictJsonLimits): StrictJ
     if (err instanceof JsonReject) return { ok: false, code: err.code };
     throw err;
   }
+}
+
+// Largest digit count of the integer part of a finite double (Number.MAX_VALUE has 309).
+const MAX_FINITE_INTEGER_DIGITS = 309;
+// Exponent magnitudes beyond this many digits cannot yield a finite, exactly integral
+// value from a token of at most a few hundred digits.
+const MAX_EXPONENT_DIGITS = 6;
+const NUMBER_PARTS = /^-?([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?)([0-9]+))?$/;
+
+/**
+ * True when the fraction/exponent `token` denotes exactly the integer `n`
+ * (already finite and integer-valued). The comparison is on decimal digits
+ * with bounded work: no BigInt exponentiation and at most
+ * MAX_FINITE_INTEGER_DIGITS characters are materialized.
+ */
+function isExactIntegralToken(token: string, n: number): boolean {
+  const parts = NUMBER_PARTS.exec(token);
+  if (!parts) return false;
+  const [, intDigits, fracDigits = "", expSign, expDigitsRaw = "0"] = parts;
+  const significant = `${intDigits}${fracDigits}`.replace(/^0+/, "");
+  if (significant === "") return n === 0; // exact zero, e.g. 0.0 or -0e5
+  const expDigits = expDigitsRaw.replace(/^0+/, "");
+  // A nonzero mantissa with an enormous negative exponent is fractional; with an
+  // enormous positive one it is not finite. Neither can equal `n`.
+  if (expDigits.length > MAX_EXPONENT_DIGITS) return false;
+  const exponent = (expSign === "-" ? -1 : 1) * Number(expDigits || "0");
+  const mantissa = significant.replace(/0+$/, "");
+  // value = mantissa × 10^scale
+  const scale = exponent - fracDigits.length + (significant.length - mantissa.length);
+  if (scale < 0) return false; // fractional value, including underflow to ±0
+  if (mantissa.length + scale > MAX_FINITE_INTEGER_DIGITS) return false;
+  const exact = `${mantissa}${"0".repeat(scale)}`;
+  const rounded = BigInt(n);
+  return (rounded < 0n ? -rounded : rounded).toString() === exact;
 }
 
 export function isJsonObject(value: JsonValue | undefined): value is JsonObject {
@@ -440,6 +482,11 @@ function appendPath(path: string, segment: string): string {
   return byteLength(next) <= MAX_DIAG_PATH_BYTES ? next : path;
 }
 
+/** Schema field path; `key` is always a literal grammar key, never author input. */
+function fieldPath(path: string, key: string): string {
+  return appendPath(path, `.${key}`);
+}
+
 function keySegment(key: string): string {
   return `.${PATH_SAFE_KEYS.has(key) ? key : "*"}`;
 }
@@ -523,7 +570,7 @@ function readObject(
     if (!required.includes(key) && !optional.includes(key)) { diag(ctx, path, "unknown_field"); ok = false; break; }
   }
   for (const key of required) {
-    if (!Object.prototype.hasOwnProperty.call(value, key)) { diag(ctx, `${path}.${key}`, "missing_field"); ok = false; }
+    if (!Object.prototype.hasOwnProperty.call(value, key)) { diag(ctx, fieldPath(path, key), "missing_field"); ok = false; }
   }
   return ok ? value : null;
 }
@@ -533,7 +580,7 @@ function readString(value: JsonValue | undefined, path: string, ctx: GrammarCtx)
 }
 
 function readOptionalString(obj: JsonObject, key: string, path: string, ctx: GrammarCtx): string | undefined | null {
-  return obj[key] === undefined ? undefined : readString(obj[key], `${path}.${key}`, ctx);
+  return obj[key] === undefined ? undefined : readString(obj[key], fieldPath(path, key), ctx);
 }
 
 function readBoolean(value: JsonValue | undefined, path: string, ctx: GrammarCtx): boolean | null {
@@ -574,18 +621,18 @@ function readRichRun(value: JsonValue, path: string, ctx: GrammarCtx): RichRun |
   switch (value.kind) {
     case "text": case "emphasis": case "strong": case "code": {
       const o = readObject(value, path, ctx, ["kind", "text"]);
-      const text = o ? readString(o.text, `${path}.text`, ctx) : null;
+      const text = o ? readString(o.text, fieldPath(path, "text"), ctx) : null;
       return o && text !== null ? { kind: value.kind, text } : null;
     }
     case "link": {
       const o = readObject(value, path, ctx, ["kind", "label", "url"]);
       if (!o) return null;
-      const label = readString(o.label, `${path}.label`, ctx);
-      const url = readString(o.url, `${path}.url`, ctx);
+      const label = readString(o.label, fieldPath(path, "label"), ctx);
+      const url = readString(o.url, fieldPath(path, "url"), ctx);
       return label !== null && url !== null ? { kind: "link", label, url } : null;
     }
     default:
-      return diag(ctx, `${path}.kind`, "unknown_kind");
+      return diag(ctx, fieldPath(path, "kind"), "unknown_kind");
   }
 }
 
@@ -595,7 +642,7 @@ function readBlocks(value: JsonValue | undefined, path: string, ctx: GrammarCtx)
 
 function readDisplayBlock(value: JsonValue, path: string, ctx: GrammarCtx): DisplayBlock | null {
   if (!isJsonObject(value)) return diag(ctx, path, "wrong_type");
-  const at = (key: string): string => `${path}.${key}`;
+  const at = (key: string): string => fieldPath(path, key);
   switch (value.kind) {
     case "heading": {
       const o = readObject(value, path, ctx, ["kind", "text"], ["level"]);
@@ -620,8 +667,8 @@ function readDisplayBlock(value: JsonValue, path: string, ctx: GrammarCtx): Disp
       const items = o ? readArray(o.items, at("items"), ctx, (v, p) => {
         const item = readObject(v, p, ctx, ["label", "value"]);
         if (!item) return null;
-        const label = readString(item.label, `${p}.label`, ctx);
-        const val = readString(item.value, `${p}.value`, ctx);
+        const label = readString(item.label, fieldPath(p, "label"), ctx);
+        const val = readString(item.value, fieldPath(p, "value"), ctx);
         return label !== null && val !== null ? { label, value: val } : null;
       }) : null;
       return items === null ? null : { kind: "facts", items };
@@ -630,7 +677,7 @@ function readDisplayBlock(value: JsonValue, path: string, ctx: GrammarCtx): Disp
       const o = readObject(value, path, ctx, ["kind", "columns"]);
       const columns = o ? readArray(o.columns, at("columns"), ctx, (v, p) => {
         const col = readObject(v, p, ctx, ["blocks"]);
-        const blocks = col ? readBlocks(col.blocks, `${p}.blocks`, ctx) : null;
+        const blocks = col ? readBlocks(col.blocks, fieldPath(p, "blocks"), ctx) : null;
         return blocks === null ? null : { blocks };
       }) : null;
       return columns === null ? null : { kind: "columns", columns };
@@ -679,7 +726,7 @@ function readDisplayArgs(args: JsonObject, ctx: GrammarCtx): DisplayCardArgs | n
   const o = readObject(args, "$", ctx, ["blocks"], ["title"]);
   if (!o) return null;
   const title = readOptionalString(o, "title", "$", ctx);
-  const blocks = readBlocks(o.blocks, "$.blocks", ctx);
+  const blocks = readBlocks(o.blocks, fieldPath("$", "blocks"), ctx);
   if (title === null || blocks === null) return null;
   return compact<DisplayCardArgs>({ title, blocks });
 }
@@ -687,14 +734,14 @@ function readDisplayArgs(args: JsonObject, ctx: GrammarCtx): DisplayCardArgs | n
 function readOption(value: JsonValue, path: string, ctx: GrammarCtx): Option | null {
   const o = readObject(value, path, ctx, ["id", "label"]);
   if (!o) return null;
-  const id = readString(o.id, `${path}.id`, ctx);
-  const label = readString(o.label, `${path}.label`, ctx);
+  const id = readString(o.id, fieldPath(path, "id"), ctx);
+  const label = readString(o.label, fieldPath(path, "label"), ctx);
   return id !== null && label !== null ? { id, label } : null;
 }
 
 function readInput(value: JsonValue, path: string, ctx: GrammarCtx): InputSpec | null {
   if (!isJsonObject(value)) return diag(ctx, path, "wrong_type");
-  const at = (key: string): string => `${path}.${key}`;
+  const at = (key: string): string => fieldPath(path, key);
   const base = ["id", "kind", "label", "required"] as const;
   const common = (o: JsonObject): { id: string; label: string; required: boolean } | null => {
     const id = readString(o.id, at("id"), ctx);
@@ -775,9 +822,9 @@ function readButtonData(value: JsonValue | undefined, path: string, ctx: Grammar
 function readButton(value: JsonValue, path: string, ctx: GrammarCtx): ButtonSpec | null {
   const o = readObject(value, path, ctx, ["id", "label"], ["data"]);
   if (!o) return null;
-  const id = readString(o.id, `${path}.id`, ctx);
-  const label = readString(o.label, `${path}.label`, ctx);
-  const data = o.data === undefined ? undefined : readButtonData(o.data, `${path}.data`, ctx);
+  const id = readString(o.id, fieldPath(path, "id"), ctx);
+  const label = readString(o.label, fieldPath(path, "label"), ctx);
+  const data = o.data === undefined ? undefined : readButtonData(o.data, fieldPath(path, "data"), ctx);
   if (id === null || label === null || data === null) return null;
   return compact<ButtonSpec>({ id, label, data });
 }
@@ -785,15 +832,15 @@ function readButton(value: JsonValue, path: string, ctx: GrammarCtx): ButtonSpec
 function readInteractiveArgs(args: JsonObject, ctx: GrammarCtx): InteractiveCardArgs | null {
   const o = readObject(args, "$", ctx, ["title", "buttons"], ["text", "sections", "inputs"]);
   if (!o) return null;
-  const title = readString(o.title, "$.title", ctx);
+  const title = readString(o.title, fieldPath("$", "title"), ctx);
   const text = readOptionalString(o, "text", "$", ctx);
-  const sections = o.sections === undefined ? undefined : readArray(o.sections, "$.sections", ctx, (v, p) => {
+  const sections = o.sections === undefined ? undefined : readArray(o.sections, fieldPath("$", "sections"), ctx, (v, p) => {
     const s = readObject(v, p, ctx, ["text"]);
-    const t = s ? readString(s.text, `${p}.text`, ctx) : null;
+    const t = s ? readString(s.text, fieldPath(p, "text"), ctx) : null;
     return t === null ? null : { text: t };
   });
-  const inputs = o.inputs === undefined ? undefined : readArray(o.inputs, "$.inputs", ctx, (v, p) => readInput(v, p, ctx));
-  const buttons = readArray(o.buttons, "$.buttons", ctx, (v, p) => readButton(v, p, ctx));
+  const inputs = o.inputs === undefined ? undefined : readArray(o.inputs, fieldPath("$", "inputs"), ctx, (v, p) => readInput(v, p, ctx));
+  const buttons = readArray(o.buttons, fieldPath("$", "buttons"), ctx, (v, p) => readButton(v, p, ctx));
   if (title === null || text === null || sections === null || inputs === null || buttons === null) return null;
   return compact<InteractiveCardArgs>({ title, text, sections, inputs, buttons });
 }
