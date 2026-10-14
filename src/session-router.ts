@@ -82,7 +82,7 @@ export class SessionRouter {
   private readonly ledger?: TurnLedger;
   private readonly conversationMarkdown: ConversationMarkdown;
 
-  constructor(config: Config, robotId: string, ownerUid: string | (() => string) = '', documentStore?: import('./conversation-md.js').ConversationDocumentStore) {
+  constructor(config: Config, robotId: string, ownerUid: string | (() => string) = '', documentStore?: import('./conversation-md.js').ConversationDocumentStore, private readonly ownerChannelId: string | (() => string) = '') {
     if (documentStore && 'beginTurn' in documentStore) this.ledger = documentStore as typeof documentStore & TurnLedger;
     this.config = config;
     this.robotId = robotId;
@@ -170,10 +170,10 @@ export class SessionRouter {
     const key = this.sessionKey(msg);
     return this.withSessionLock(key, async () => {
       if (this.stopping) return null;
-      const result = await this.processMessage(msg, key);
+      const result = await this.processMessage(msg, key, true);
       if (!result || !result.shouldProcess) return result;
       if (this.stopping) return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
-      // Control commands pass the normal transport/mention/rate gates but do not
+      // Control commands pass transport/mention and session/user rate gates but do not
       // enter the model or begin a new execution generation.
       if (await this.handleReconciliation(result)) {
         return { ...result, shouldProcess:false, rejectionReason:'control' };
@@ -197,8 +197,9 @@ export class SessionRouter {
         const lastNotice = this.quarantineNotices.get(key);
         if (lastNotice === undefined || Date.now() - lastNotice >= 60_000) {
           if (this.quarantineNotices.size >= 1000) this.quarantineNotices.delete(this.quarantineNotices.keys().next().value!);
+          this.quarantineNotices.delete(key);
           this.quarantineNotices.set(key, Date.now());
-          await this.replySafe(msg, `⚠️ 上次任务的执行状态尚未确认，本会话暂停新任务。编号 ${quarantinedId}。核对已执行的操作后，由注册主人发送 /reconcile ${quarantinedId} --external-results-verified 即可恢复；不会重跑旧任务。`);
+          await this.replySafe(msg, this.pauseNotice(msg, key, quarantinedId));
         }
         return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
       }
@@ -224,6 +225,7 @@ export class SessionRouter {
   }
 
   private async runHandlerWithTimeout(result: RouteResult, handler: (result: RouteResult, turn: TurnContext) => Promise<void>): Promise<void> {
+    if (this.stopping) return;
     const id = diagnosticId();
     const generation = this.ledger?.beginTurn(result.sessionKey, id) ?? 1;
     const turn = new TurnContext(this.config.dispatchTimeoutMs, generation, id);
@@ -300,34 +302,59 @@ export class SessionRouter {
       const paused = this.ledger ? this.ledger.getQuarantinedTurnId(result.sessionKey) : this.quarantined.get(result.sessionKey);
       await this.replySafe(result.message, ended && !paused
         ? `✓ 原任务执行已结束。可以发送新任务，或要求继续上个任务；不会自动重跑。编号 ${turn.turnId}`
-        : `⚠️ 原任务停止尚未确认，本会话暂缓新任务。编号 ${turn.turnId}。清理完成后会自动放行；仍无法停止时需核对并由注册主人使用 /reconcile ${turn.turnId} --external-results-verified 维护恢复。`);
+        : `⚠️ 原任务停止尚未确认，后续请求会重新检查清理结果。${this.pauseNotice(result.message,result.sessionKey,turn.turnId)}`);
     } finally { if (timer) clearTimeout(timer); }
   }
 
-  /** Runs under the session queue before quarantine, and never invokes a model. */
+  private isControlOwner(msg: BotMessage): boolean {
+    const channel = typeof this.ownerChannelId === 'function' ? this.ownerChannelId() : this.ownerChannelId;
+    return isOwnerSender(msg, this.getOwnerUid(), channel, this.robotId);
+  }
+
+  private pauseNotice(msg: BotMessage, key: string, turnId: string): string {
+    const prefix = `⚠️ 上次任务的执行状态尚未确认，本会话暂停新任务。编号 ${turnId}。`;
+    if (this.isControlOwner(msg)) return `${prefix}核对外部结果后发送 /reconcile ${turnId} --external-results-verified 恢复；不会重跑旧任务。`;
+    return `${prefix}请将编号交给注册主人；主人可在与机器人的私聊中发送 /reconcile ${turnId} --session ${key} --external-results-verified。不会重跑旧任务。`;
+  }
+
+  /** Registration-bound control path; never invokes a model or resets history. */
   private async handleReconciliation(result: RouteResult): Promise<boolean> {
     const { message: msg, sessionKey: key, cleanContent } = result;
     if (msg.payload.type !== MessageType.Text || this.isCronFire(msg)) return false;
     const body = cleanContent?.trim() ?? '';
     if (!/^\/reconcile(?:\s|$)/i.test(body)) return false;
-    // Use transport identity and registration binding; body claims cannot grant access.
-    if (!isOwnerSender(msg, this.getOwnerUid())) {
-      await this.replySafe(msg, '仅注册主人可以核对并恢复本会话。');
+    if (!this.isControlOwner(msg)) {
+      // Silent on healthy sessions; mark control so commands never enter history.
+      if (this.ledger?.isTurnQuarantined(key) || this.quarantined.has(key)) {
+        await this.replySafe(msg, '仅注册主人可以核对并恢复本会话，请将任务编号交给主人。');
+      }
       return true;
     }
-    const match = /^\/reconcile ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) --external-results-verified$/i.exec(body);
+    const match = /^\/reconcile\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\s+--session\s+([^\s\x00-\x1f\x7f]{1,512}))?\s+--external-results-verified$/i.exec(body);
     if (!match) {
-      await this.replySafe(msg, '核对已执行操作后，发送 /reconcile <任务编号> --external-results-verified 恢复会话；不会重跑旧任务。');
+      await this.replySafe(msg, '核对外部结果后发送 /reconcile <任务编号> [--session <会话标识>] --external-results-verified；指定其他会话时请从本人私聊发送。');
       return true;
     }
-    if ([...this.turns.values()].includes(key)) {
-      await this.replySafe(msg, '原任务仍在停止处理中，暂时不能恢复，请稍后再试。');
+    const target = match[2] ?? key;
+    if (match[2] && msg.channel_type !== ChannelType.DM) {
+      await this.replySafe(msg, '请从与机器人的本人私聊中指定目标会话。');
       return true;
     }
+    // These checks and the conditional SQLite update are synchronous: another
+    // queued turn cannot interleave. Never nest session locks (cross-target
+    // commands could deadlock); active rows and retained handlers fail closed.
+    let reply: string;
     const id = match[1].toLowerCase();
-    const released = this.ledger ? this.ledger.reconcileTurn(key, id) : this.quarantined.get(key) === id;
-    if (released) { this.quarantined.delete(key); this.quarantineNotices.delete(key); }
-    await this.replySafe(msg, released ? '✓ 本会话已恢复，没有重跑旧任务。可以发送新消息。' : '任务编号与本会话的暂停记录不匹配，请检查编号。');
+    if ([...this.turns.values()].includes(target)) {
+      reply = '原任务仍在停止处理中，暂时不能恢复，请稍后再试。';
+    } else if (this.ledger?.getTurnState(target) === 'active') {
+      reply = '目标任务仍标记为运行中，不能解除隔离；请联系维护者核对运行状态，任务编号不一定有误。';
+    } else {
+      const released = this.ledger ? this.ledger.reconcileTurn(target, id) : this.quarantined.get(target) === id;
+      if (released) { this.quarantined.delete(target); this.quarantineNotices.delete(target); }
+      reply = released ? '✓ 目标会话已恢复，没有重跑旧任务。可以发送新消息。' : '任务编号与目标会话的暂停记录不匹配，请检查编号和会话标识。';
+    }
+    await this.replySafe(msg, reply);
     return true;
   }
 
@@ -452,7 +479,7 @@ export class SessionRouter {
     return isAuthenticCronFire(msg.payload);
   }
 
-  private async processMessage(msg: BotMessage, key: string): Promise<RouteResult | null> {
+  private async processMessage(msg: BotMessage, key: string, quarantineAware = false): Promise<RouteResult | null> {
     // Drop anything that isn't a real conversation channel (DM / group /
     // community topic). Octo emits system/command channels (e.g. channel_type 8
     // "systemcmdonline" on connect) that otherwise slip past the DM/group gates
@@ -536,7 +563,7 @@ export class SessionRouter {
     // user spam. Without this a fire that lands while the owner's bucket is
     // exhausted would be silently dropped while its nextRun has already advanced.
     if (!this.isCronFire(msg)) {
-      const blocker = this.checkAllRateLimits(key, msg.from_uid);
+      const blocker = this.checkAllRateLimits(key, msg.from_uid, quarantineAware && (this.ledger?.isTurnQuarantined(key) ?? this.quarantined.has(key)));
       if (blocker) {
         if (!blocker.notified) {
           blocker.notified = true;
@@ -614,7 +641,7 @@ export class SessionRouter {
    * blocked by per-user limit doesn't get spammed when their per-session
    * bucket still has tokens.
    */
-  private checkAllRateLimits(key: string, uid: string): TokenBucket | null {
+  private checkAllRateLimits(key: string, uid: string, skipGlobal = false): TokenBucket | null {
     this.cleanStaleBuckets();
 
     const now = Date.now();
@@ -641,16 +668,16 @@ export class SessionRouter {
     // Check in priority order: global → per-user → per-session.
     // Per-user before per-session so a user blocked across groups gets a
     // consistent debounce target instead of one per session bucket.
-    if (globalBucket.tokens < 1) return globalBucket;
+    if (!skipGlobal && globalBucket.tokens < 1) return globalBucket;
     if (userBucket.tokens < 1) return userBucket;
     if (sessionBucket.tokens < 1) return sessionBucket;
 
     // All pass — consume one token from each, and clear notified flags so
     // future blocks get a fresh debounce window.
-    globalBucket.tokens -= 1;
+    if (!skipGlobal) globalBucket.tokens -= 1;
     sessionBucket.tokens -= 1;
     userBucket.tokens -= 1;
-    globalBucket.notified = false;
+    if (!skipGlobal) globalBucket.notified = false;
     sessionBucket.notified = false;
     userBucket.notified = false;
     return null;

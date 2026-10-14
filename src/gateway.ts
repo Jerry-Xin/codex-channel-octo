@@ -26,6 +26,7 @@ export class OctoGateway {
   private registration: Awaited<ReturnType<typeof registerBot>> | null = null;
   // G18: owner_uid from registerBot; used by SessionRouter for future permission model.
   private _ownerUid = '';
+  private _ownerChannelId = '';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private lockFilePath: string;
   /** Random per-process token written into the lock so ownership survives PID
@@ -68,6 +69,9 @@ export class OctoGateway {
     return this._ownerUid;
   }
 
+  /** Exact server registration channel; used to bind privileged owner aliases. */
+  get ownerChannelId(): string { return this._ownerChannelId; }
+
   /** Set the message handler. Called for every incoming BotMessage. */
   setMessageHandler(handler: MessageHandler): void {
     this.onMessage = handler;
@@ -100,6 +104,7 @@ export class OctoGateway {
       });
       this.robotId = reg.robot_id;
       this._ownerUid = reg.owner_uid;
+      this._ownerChannelId = reg.owner_channel_id ?? '';
       this.registration = reg;
       console.log(`Bot registered: robot_id=${reg.robot_id}`);
     } catch (err) {
@@ -387,6 +392,7 @@ export class OctoGateway {
       if (!isAllowedWsUrl(reg.ws_url)) throw new Error('Registration returned an insecure WebSocket URL');
       this.robotId = reg.robot_id;
       this._ownerUid = reg.owner_uid;
+      this._ownerChannelId = reg.owner_channel_id ?? '';
       this.registration = reg;
       console.log('Token refreshed, reconnecting...');
       this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);

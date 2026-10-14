@@ -11,8 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Allow a new user request or explicit continuation in the same conversation after interrupted execution has stopped. Keep failed-task context and late-callback fencing without automatically replaying the old request; queue new requests during bounded cleanup and retain maintenance protection when teardown cannot be confirmed.
 - Confirm interrupted POSIX process-group teardown through private per-attempt acknowledgments instead of treating an SDK error or sent signal as exit proof.
-
-### Fixed
+- Bind privileged recovery to registration-provided owner identities and allow
+  owner-DM recovery of explicit third-party sessions without gateway downtime.
+  Paused traffic no longer consumes the global model budget; active tasks have
+  distinct refusal messages. Retain unresolved output evidence through expiry,
+  document local-only correlation IDs, and preserve safe API endpoint/status
+  diagnostics across POST/GET/upload failures without retaining server bodies.
 
 - Registered owners can reconcile one paused conversation in chat without taking the gateway offline. Pause notices include its exact task ID; active local handlers, wrong task IDs and non-owners cannot release it. Offline release is no longer shadowed by an in-memory pause flag.
 - Timeout and graceful shutdown do not quarantine positively unstarted model turns. Unknown/observed effects remain protected and are never automatically replayed.

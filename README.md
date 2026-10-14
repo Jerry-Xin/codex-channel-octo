@@ -144,6 +144,24 @@ IM input is **untrusted**; the permission boundary is the **sandbox**, not the p
 - A non-overridable security prefix (anti-injection) is written into each session's sandbox `AGENTS.md` and restated atop the prompt (defense in depth, but only a soft constraint).
 - Each bot has its own `CODEX_HOME`, so IM content does not land in your personal `~/.codex` by default.
 
+### Safe failure handling and recovery
+
+Failures carry a safe diagnostic ID and category. New user requests, including explicit continuation, can run after the interrupted handler and its managed execution have stopped. Timeouts cancel and fence the old turn; new requests queue during bounded cleanup. A failed-task snapshot preserves stage and execution risk without automatically replaying old work or claiming external rollback. See [session continuity](docs/session-continuity.md). Missing teardown proof and historical/crash quarantine retain the maintenance path; `/reset` and restart cannot waive that protection.
+
+When managed teardown cannot be confirmed, after checking the prior execution and effects, the **registered Octo owner** can recover only the affected conversation while the bot stays online:
+
+```text
+/reconcile <turn-id> --external-results-verified
+```
+
+To recover another user's DM or an inaccessible group, send from the owner's own DM:
+
+```text
+/reconcile <turn-id> --session <session-key> --external-results-verified
+```
+
+Authorization uses the exact registered owner UID or the single alias explicitly bound by the server's registration owner channel; it never trusts arbitrary incoming UID suffixes. Bindings refresh with registration. Without a usable scoped binding, aliases fail closed. The pause notice includes the exact turn ID and tells non-owners which session key to give the owner. In groups, @mention the bot before the command. A wrong ID, non-owner, or still-running local handler cannot release the pause. Recovery never replays the old task or clears history. Transport, mention and sender/session limits still apply. Paused-session messages do not consume the global model-request budget. Active rows receive an explicit still-running diagnosis, not an ID-typo hint. The 300-second default dispatch timeout may need increasing for long tasks; missing teardown proof retains maintenance protection regardless of visible tool events. Optional `sdk.recovery` is disabled by default and only retries positively established pre-execution temporary failures. See [the detailed recovery and offline maintenance guide](docs/issue-26-safe-recovery.md).
+
 ### Unicode JSONL transport compatibility
 
 On macOS/Linux, an executable proxy escapes raw U+2028/U+2029 in CLI stdout before the SDK's `readline` reader. These are legal JSON string characters, but Node v24.10.0 treats them as line endings and can split valid events, yielding `Failed to parse item` and killing the SDK child. Escaping preserves the decoded event contents, including command output; UTF-8 chunks, stdin, stderr, backpressure and signals are forwarded. The proxy resolves the CLI dependency belonging to the installed SDK. Windows retains direct SDK launch; this Unix workaround is not a validated Windows fix.
@@ -201,15 +219,3 @@ npm run type-check  # tsc --noEmit
 ## License
 
 Apache-2.0
-
-### Safe failure handling and recovery
-
-Failures carry a safe diagnostic ID and category. New user requests, including explicit continuation, can run after the interrupted handler and its managed execution have stopped. Timeouts cancel and fence the old turn; new requests queue during bounded cleanup. A failed-task snapshot preserves stage and execution risk for the next request without automatically replaying old work or claiming external rollback. See [session continuity](docs/session-continuity.md). Missing teardown proof and historical/crash quarantine retain the maintenance path; `/reset` and restart cannot waive that protection.
-
-If managed teardown cannot be confirmed, after checking the prior task's execution and effects, the **registered Octo owner** can recover only the affected conversation while the bot stays online:
-
-```text
-/reconcile <turn-id> --external-results-verified
-```
-
-The pause notice includes the exact turn ID. In groups, @mention the bot before the command. A wrong ID, non-owner, or still-running local handler cannot release the pause. Recovery never replays the old task or clears history. Ordinary transport, mention and rate limits still apply. Optional `sdk.recovery` is disabled by default and only retries positively established pre-execution temporary failures. See [the detailed recovery and offline maintenance guide](docs/issue-26-safe-recovery.md).

@@ -7,6 +7,7 @@ import { sendMessage } from '../octo/api.js';
 import { createAdapter } from '../db-adapter.js';
 import { SessionStore } from '../session-store.js';
 import { SessionRouter } from '../session-router.js';
+import { isOwnerSender } from '../sender-context.js';
 import type { TurnContext } from '../turn-context.js';
 import type { Config } from '../config.js';
 import { ChannelType, MessageType, type BotMessage } from '../octo/types.js';
@@ -75,4 +76,126 @@ describe('paused session recovery', () => {
   quarantine('group');await router.routeAndHandle(message(command,{channel_id:'group',channel_type:ChannelType.Group}),vi.fn());
   expect(store.isTurnQuarantined('group')).toBe(true);expect(sendMessage).not.toHaveBeenCalled();
  });
+ it.each(['sPUB_owner', 'sEVIL_owner'])('rejects a suffix-only owner alias not bound by registration (%s)', async sender => {
+  const group = sender.replace('owner', 'group');
+  quarantine(group);
+  await router.routeAndHandle(message(command, { from_uid: sender, channel_id: group, channel_type: ChannelType.Group,
+    payload: { type: MessageType.Text, content: command, mention: { uids: ['bot'] } } }), vi.fn());
+  expect(store.isTurnQuarantined(group)).toBe(true);
+ });
+ it('accepts the single prefixed identity bound by the registration channel, and rejects other spaces', async () => {
+  const scoped = new SessionRouter(config, 'bot', 'owner', store, 'sPUB_owner@sPUB_bot');
+  quarantine(scoped.sessionKey(message(command, { from_uid: 'sPUB_owner', channel_id: 'sPUB_owner@sPUB_bot' })));
+  await scoped.routeAndHandle(message(command, { from_uid: 'sPUB_owner', channel_id: 'sPUB_owner@sPUB_bot' }), vi.fn());
+  expect(store.isTurnQuarantined(scoped.sessionKey(message(command, { from_uid: 'sPUB_owner', channel_id: 'sPUB_owner@sPUB_bot' })))).toBe(false);
+  quarantine(scoped.sessionKey(message(command, { from_uid: 'sEVIL_owner', channel_id: 'sEVIL_owner@sEVIL_bot' })));
+  await scoped.routeAndHandle(message(command, { from_uid: 'sEVIL_owner', channel_id: 'sEVIL_owner@sEVIL_bot' }), vi.fn());
+  expect(store.isTurnQuarantined(scoped.sessionKey(message(command, { from_uid: 'sEVIL_owner', channel_id: 'sEVIL_owner@sEVIL_bot' })))).toBe(true);
+ });
+ it('refreshes the control identity with the registration channel instead of caching an inferred alias', async () => {
+  let ownerChannel = 'sOLD_owner@sOLD_bot';
+  const dynamic = new SessionRouter(config, 'bot', 'owner', store, () => ownerChannel);
+  quarantine(dynamic.sessionKey(message(command, { from_uid: 'sOLD_owner', channel_id: 'sOLD_owner@sOLD_bot' })));
+  ownerChannel = 'sNEW_owner@sNEW_bot';
+  await dynamic.routeAndHandle(message(command, { from_uid: 'sOLD_owner', channel_id: 'sOLD_owner@sOLD_bot' }), vi.fn());
+  expect(store.isTurnQuarantined(dynamic.sessionKey(message(command, { from_uid: 'sOLD_owner', channel_id: 'sOLD_owner@sOLD_bot' })))).toBe(true);
+  quarantine(dynamic.sessionKey(message(command, { from_uid: 'sNEW_owner', channel_id: 'sNEW_owner@sNEW_bot' })));
+  await dynamic.routeAndHandle(message(command, { from_uid: 'sNEW_owner', channel_id: 'sNEW_owner@sNEW_bot' }), vi.fn());
+  expect(store.isTurnQuarantined(dynamic.sessionKey(message(command, { from_uid: 'sNEW_owner', channel_id: 'sNEW_owner@sNEW_bot' })))).toBe(false);
+ });
+ it('lets the owner recover a third-party DM from their own DM, without replay', async () => {
+  quarantine('alice');
+  await router.routeAndHandle(message('help', { from_uid: 'alice', channel_id: 'alice' }), vi.fn());
+  expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain(`--session alice`);
+  const model = vi.fn();
+  const result = await router.routeAndHandle(message(`/reconcile  ${id}   --session alice  --external-results-verified `), model);
+  expect(result?.rejectionReason).toBe('control');
+  expect(store.isTurnQuarantined('alice')).toBe(false);
+  expect(model).not.toHaveBeenCalled();
+  await router.routeAndHandle(message('new task', { from_uid: 'alice', channel_id: 'alice' }), model);
+  expect(model).toHaveBeenCalledOnce();
+ });
+ it('does not allow a non-owner to use an explicit target', async () => {
+  quarantine('alice');
+  await router.routeAndHandle(message(`/reconcile ${id} --session alice --external-results-verified`, { from_uid: 'mallory', channel_id: 'mallory' }), vi.fn());
+  expect(store.isTurnQuarantined('alice')).toBe(true);
+  expect(sendMessage).not.toHaveBeenCalled();
+ });
+ it('requires the exact target and ID and refuses cross-session controls in a group', async () => {
+  quarantine('alice');
+  await router.routeAndHandle(message(`/reconcile ${id} --session bob --external-results-verified`), vi.fn());
+  expect(store.isTurnQuarantined('alice')).toBe(true);
+  await router.routeAndHandle(message(command, { channel_id: 'group', channel_type: ChannelType.Group,
+    payload: { type: MessageType.Text, content: `/reconcile ${id} --session alice --external-results-verified`, mention: { uids: ['bot'] } } }), vi.fn());
+  expect(store.isTurnQuarantined('alice')).toBe(true);
+ });
+ it('refuses an active target with a useful diagnosis instead of blaming the ID', async () => {
+  store.beginTurn('alice', id);
+  await router.routeAndHandle(message(`/reconcile ${id} --session alice --external-results-verified`), vi.fn());
+  expect(store.getTurnState('alice')).toBe('active');
+  expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('运行中');
+ });
+ it('does not let paused senders exhaust the global budget of a healthy owner session', async () => {
+  const limited = new SessionRouter({ ...config, rateLimit: { maxPerMinute: 1 } }, 'bot', 'owner', store);
+  quarantine('group');
+  for (let i = 0; i < 12; i++) {
+    await limited.routeAndHandle(message('hi', { from_uid: `user${i}`, channel_id: 'group', channel_type: ChannelType.Group,
+      payload: { type: MessageType.Text, content: 'hi', mention: { uids: ['bot'] } } }), vi.fn());
+  }
+  const model = vi.fn();
+  const result = await limited.routeAndHandle(message('healthy'), model);
+  expect(result?.shouldProcess).toBe(true);
+  expect(model).toHaveBeenCalledOnce();
+ });
+ it('retains non-clean output evidence beyond retention, then expires it after reconciliation', () => {
+  const database = createAdapter(join(root, 'db.sqlite'));
+  try {
+    quarantine('alice');
+    store.saveTurnOutput(id, 'alice', 'generated answer', 1, 'bot');
+    store.saveDeliveryPart(id, 0, 'local-key', '{}');
+    store.markDeliveryPart(id, 0, 'unknown');
+    database.prepare('UPDATE turn_outputs SET created_at=0').run();
+    database.prepare('UPDATE turn_execution SET updated_at=0').run();
+    store.cleanExpired();
+    expect(database.prepare('SELECT state FROM delivery_parts').get()).toMatchObject({ state: 'unknown' });
+    expect(database.prepare('SELECT count(*) AS count FROM turn_outputs').get()).toMatchObject({ count: 1 });
+    expect(store.isTurnQuarantined('alice')).toBe(true);
+    store.reconcileTurn('alice', id);
+    store.cleanExpired();
+    expect(database.prepare('SELECT count(*) AS count FROM turn_outputs').get()).toMatchObject({ count: 0 });
+    expect(database.prepare('SELECT count(*) AS count FROM delivery_parts').get()).toMatchObject({ count: 0 });
+  } finally { database.close(); }
+ });
+
+ it.each([
+  ['owner', '', true],
+  ['sPUB_owner', '', false],
+  ['sEVIL_owner', 'sPUB_owner@sPUB_bot', false],
+  ['sPUB_owner', 'sPUB_owner@sPUB_bot', true],
+  ['sPUB_owner', 'sPUB_owner', true],
+  ['sPUB_owner', 'sPUB_owner@wrong-bot', false],
+  ['sPUB_owner', 'sPUB_owner@sPUB_bot@extra', false],
+  ['sPUB_ownerX', 'sPUB_owner@sPUB_bot', false],
+ ])('binds control identity %s to registration channel %s', (sender, ownerChannel, allowed) => {
+  expect(isOwnerSender(message('', { from_uid: sender, channel_id: sender }), 'owner', ownerChannel, 'bot')).toBe(allowed);
+ });
+ it('refuses an explicit target while its old handler remains live', async () => {
+  const short = new SessionRouter({ ...config, dispatchTimeoutMs: 5 }, 'bot', 'owner', store);
+  let finish!: () => void;
+  let turn!: TurnContext;
+  await short.routeAndHandle(message('task', { from_uid: 'alice', channel_id: 'alice' }), async (_r, t) => {
+    turn = t;
+    t.executionRisk = 'effects_observed';
+    await new Promise<void>(resolve => { finish = resolve; });
+  });
+  const recover = message(`/reconcile ${turn.turnId} --session alice --external-results-verified`);
+  await short.routeAndHandle(recover, vi.fn());
+  expect(store.isTurnQuarantined('alice')).toBe(true);
+  expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('停止处理中');
+  finish();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await short.routeAndHandle(recover, vi.fn());
+  expect(store.isTurnQuarantined('alice')).toBe(false);
+ });
+
 });

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, review/pr28-safe-recovery]
+    branches: [main, review/pr28-2277fea]
 
 permissions:
   contents: read

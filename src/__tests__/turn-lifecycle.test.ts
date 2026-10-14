@@ -8,6 +8,7 @@ import { createAdapter, type DbAdapter } from '../db-adapter.js';
 import { SessionStore } from '../session-store.js';
 import { SessionRouter } from '../session-router.js';
 import { StreamRelay } from '../stream-relay.js';
+import { AgentFailure } from '../agent-failure.js';
 import { TurnContext } from '../turn-context.js';
 import type { Config } from '../config.js';
 import { ChannelType, MessageType, type BotMessage } from '../octo/types.js';
@@ -72,6 +73,12 @@ describe('delivery outcome and outbox',()=>{
   expect(vi.mocked(sendMessage).mock.calls[0][0].clientMsgNo).not.toBe('server-generated-key');
   store.commitTurnOutput(turn.turnId);
   expect(store.buildHistoryPrefix('s',10).match(/answer/g)).toHaveLength(1);
+ });
+ it('preserves safe API status and endpoint through the relay boundary', async () => {
+  const error = new AgentFailure({ stage: 'delivery', category: 'auth', source: 'octo_api', evidence: 'structured', httpStatus: 401, endpoint: '/v1/bot/sendMessage' });
+  vi.mocked(sendMessage).mockRejectedValueOnce(error);
+  await expect(deliver('answer')).rejects.toBe(error);
+  expect(adapter.prepare('SELECT state FROM delivery_parts').get()).toMatchObject({ state: 'unknown' });
  });
  it('stops subsequent segments after one ambiguous send; never loses generated output',async()=>{
   vi.mocked(sendMessage).mockResolvedValueOnce({message_id:'1',message_seq:1}).mockRejectedValueOnce(new Error('PRIVATE_RESPONSE'));

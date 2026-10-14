@@ -22,7 +22,8 @@ export function parseRetryAfter(value: string | undefined, now = Date.now()): nu
   const date = Date.parse(value); return Number.isFinite(date) && date >= now ? date - now : undefined;
 }
 export function retryDelay(failure: FailureSnapshot, attempt: number, config: Required<RecoveryConfig>, random = Math.random): number {
-  const jitter = Math.floor(random() * Math.min(config.maxDelayMs, config.baseDelayMs * 2 ** (attempt - 1)));
+  const ceiling = Math.min(config.maxDelayMs, config.baseDelayMs * 2 ** (attempt - 1));
+  const jitter = Math.floor(ceiling / 2 + random() * ceiling / 2);
   return Math.max(jitter, failure.retryAfterMs ?? 0);
 }
 /** Only positive pre-exec evidence is eligible in the current unrestricted tool runtime. */

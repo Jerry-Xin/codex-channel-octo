@@ -197,9 +197,9 @@ describe('attempt markers', () => {
   });
 
   it.each([{message:interrupt,resume:undefined,partial:false},{message:staleErr,resume:'old',partial:false},{message:interrupt,resume:'old',partial:true},{message:staleErr,resume:'old',partial:true}])('has no recovery attempt/end after $message (partial=$partial)',async({message,resume,partial})=>{
- const reset=vi.fn();scriptedRuns=[async function*(){yield started('t');if(partial)yield msg('before','partial');throw new Error(message);}];const seen:AgentOutputEvent[]=[];
- await expect((async()=>{for await(const e of queryAgentEvents('hi',cfg(),undefined,undefined,{resume,onResumeFailed:reset}))seen.push(e);})()).rejects.toMatchObject({report:{attempts:1,decision:'blocked_uncertain'}});
- expect(seen.map(e=>e.kind)).toEqual(partial?['attempt_start','message']:['attempt_start']);expect(runIdx).toBe(1);expect(reset).not.toHaveBeenCalled();
+ scriptedRuns=[async function*(){yield started('t');if(partial)yield msg('before','partial');throw new Error(message);}];const seen:AgentOutputEvent[]=[];
+ await expect((async()=>{for await(const e of queryAgentEvents('hi',cfg(),undefined,undefined,{resume}))seen.push(e);})()).rejects.toMatchObject({report:{attempts:1,decision:'blocked_uncertain'}});
+ expect(seen.map(e=>e.kind)).toEqual(partial?['attempt_start','message']:['attempt_start']);expect(runIdx).toBe(1);
  });
 
 
@@ -247,18 +247,23 @@ describe('T25: one canonical options contract', () => {
     expectTypeOf<Parameters<typeof queryAgent>>().toEqualTypeOf<Parameters<typeof queryAgentEvents>>();
   });
 
-  it('preserves every existing option field', () => {
+  it('exposes only supported query options', () => {
+    expectTypeOf<Extract<keyof QueryAgentOptions, 'onResumeFailed' | 'fallbackRetryPrompt'>>().toEqualTypeOf<never>();
     expectTypeOf<QueryAgentOptions>().toEqualTypeOf<{
       resume?: string;
       onSessionId?: (id: string, prompt: string) => void;
       groupInstructions?: string;
-      onResumeFailed?: () => void;
-      fallbackRetryPrompt?: string;
+      senderContext?: import('../prompt-safety.js').SafeText;
+      signal?: AbortSignal;
+      deadline?: number;
+      diagnosticId?: string;
+      assertPublishable?: () => void;
+      onExecutionRisk?: (risk: import('../agent-failure.js').ExecutionRisk) => void;
     }>();
   });
 
-  it('onSessionId observes the current attempt; unsafe reset callback is never used',async()=>{
- const session=vi.fn(),reset=vi.fn();scriptedRuns=[async function*(){yield started('t');yield turnDone;}];
- await events({resume:'t',onSessionId:session,onResumeFailed:reset});expect(session).toHaveBeenCalledWith('t',expect.stringContaining('hi'));expect(reset).not.toHaveBeenCalled();
+  it('onSessionId observes the current attempt without a replay callback',async()=>{
+ const session=vi.fn();scriptedRuns=[async function*(){yield started('t');yield turnDone;}];
+ await events({resume:'t',onSessionId:session});expect(session).toHaveBeenCalledWith('t',expect.stringContaining('hi'));
  });
 });

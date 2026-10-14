@@ -254,7 +254,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     }
 
     // --- Session router ---
-    const router = new SessionRouter(config, gateway.botId, () => gateway.ownerUid, store);
+    const router = new SessionRouter(config, gateway.botId, () => gateway.ownerUid, store, () => gateway.ownerChannelId);
 
     // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
     const activeHandlers = new Set<Promise<void>>();
@@ -343,7 +343,7 @@ export async function handleMessage(
     const turnGroupContext = turn.guard(groupContext);
     const sendMessage = (params: Parameters<typeof import('./octo/api.js').sendMessage>[0]) => {
       turn.assertPublishable();
-      return sendTurnMessage({ ...params, signal: AbortSignal.any([turn.signal, AbortSignal.timeout(30_000)]) });
+      return sendTurnMessage({ ...params, signal: turn.signal });
     };
     let stage: FailureStage = 'prepare';
     let modelAttempts = 0;

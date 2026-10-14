@@ -25,7 +25,7 @@ class Script {
   private next = 0;
   private readonly sight = new Map<string, number>();
 
-  start(reason: 'initial' | 'stream_recovery' | 'fresh_retry' = 'initial', continues: number | null = null): this {
+  start(reason: 'initial' | 'request_retry' = 'initial', continues: number | null = null): this {
     this.cur = this.next++;
     this.events.push({ kind: 'attempt_start', attempt: this.cur, reason, continues });
     return this;
@@ -215,7 +215,7 @@ describe('selection table', () => {
 describe('attempt eligibility', () => {
   it('T7a: I → R(I) with R producing messages → only R', () => {
     const sel = s().start().msg('item_0', 'from I')
-      .start('stream_recovery', 0).msg('item_0', 'from R').end().select();
+      .start('request_retry', 0).msg('item_0', 'from R').end().select();
     expect(sel.text).toBe('from R');
     expect(sel.pool).toBe('primary');
     expect(sel.droppedMessageCount).toBe(1);
@@ -223,7 +223,7 @@ describe('attempt eligibility', () => {
 
   it('T7b: R empty, I has an unknown message → lineage', () => {
     const sel = s().start().msg('item_0', 'u1').work('item_1')
-      .start('stream_recovery', 0).end().select();
+      .start('request_retry', 0).end().select();
     expect(sel.text).toBe('u1');
     expect(sel.pool).toBe('lineage');
     expect(sel.source).toBe('unclassified_all');
@@ -231,22 +231,22 @@ describe('attempt eligibility', () => {
 
   it('T7c: I(stale) → FR with FR empty → empty (stale attempt never eligible)', () => {
     const sel = s().start().msg('item_0', 'stale')
-      .start('fresh_retry', null).end().select();
+      .start('request_retry', null).end().select();
     expect(sel.source).toBe('empty');
     expect(sel.text).toBe('');
   });
 
   it('T7d: I(stale) → FR → R(FR) with R empty → lineage is FR only', () => {
     const sel = s().start().msg('item_0', 'stale')
-      .start('fresh_retry', null).msg('item_0', 'fresh')
-      .start('stream_recovery', 1).end().select();
+      .start('request_retry', null).msg('item_0', 'fresh')
+      .start('request_retry', 1).end().select();
     expect(sel.text).toBe('fresh');
     expect(sel.pool).toBe('lineage');
   });
 
   it('T7e: I commentary → R(I) commentary only → only R commentary (lineage unused)', () => {
     const sel = s().start().msg('item_0', 'c1', 'commentary')
-      .start('stream_recovery', 0).msg('item_0', 'c2', 'commentary').end().select();
+      .start('request_retry', 0).msg('item_0', 'c2', 'commentary').end().select();
     expect(sel.text).toBe('c2');
     expect(sel.source).toBe('commentary_last_resort');
     expect(sel.pool).toBe('primary');
@@ -254,7 +254,7 @@ describe('attempt eligibility', () => {
 
   it('T7f: R empty, I commentary only → K_comm(L)', () => {
     const sel = s().start().msg('item_0', 'c1', 'commentary')
-      .start('stream_recovery', 0).end().select();
+      .start('request_retry', 0).end().select();
     expect(sel.text).toBe('c1');
     expect(sel.source).toBe('commentary_last_resort');
     expect(sel.pool).toBe('lineage');
@@ -262,14 +262,14 @@ describe('attempt eligibility', () => {
 
   it('T8: a stale attempt never contributes, even with messages and a non-empty FR', () => {
     const sel = s().start().msg('item_0', 'stale')
-      .start('fresh_retry', null).msg('item_0', 'fresh').end().select();
+      .start('request_retry', null).msg('item_0', 'fresh').end().select();
     expect(sel.text).toBe('fresh');
     expect(sel.droppedMessageCount).toBe(0);
   });
 
   it('heuristic R2 is not applied to the lineage pool', () => {
     const sel = s().start().msg('item_0', 'a').work('item_1').msg('item_2', 'b')
-      .start('stream_recovery', 0).end().select('heuristic');
+      .start('request_retry', 0).end().select('heuristic');
     expect(sel.source).toBe('unclassified_all');
     expect(sel.text).toBe('a\n\nb');
   });
@@ -280,13 +280,13 @@ describe('attempt eligibility', () => {
 describe('T14: legacy mode equals the baseline join', () => {
   const chains: Array<[string, Script]> = [
     ['I', s().start().msg('a', 'one').work('w').msg('b', 'two').end()],
-    ['I → R(I)', s().start().msg('a', 'lost').start('stream_recovery', 0).msg('a', 'kept').msg('b', '!').end()],
-    ['I(stale) → FR', s().start().msg('a', 'stale').start('fresh_retry', null).msg('a', 'fresh').end()],
-    ['I(stale) → FR → R(FR)', s().start().start('fresh_retry', null).msg('a', 'x').start('stream_recovery', 1).msg('a', 'y').end()],
+    ['I → R(I)', s().start().msg('a', 'lost').start('request_retry', 0).msg('a', 'kept').msg('b', '!').end()],
+    ['I(stale) → FR', s().start().msg('a', 'stale').start('request_retry', null).msg('a', 'fresh').end()],
+    ['I(stale) → FR → R(FR)', s().start().start('request_retry', null).msg('a', 'x').start('request_retry', 1).msg('a', 'y').end()],
     ['snapshots', s().start().msg('a', 'v1').msg('b', 'B').msg('a', 'v2').end()],
     ['phased', s().start().msg('a', 'c', 'commentary').msg('b', 'f', 'final_answer').end()],
     ['empty texts', s().start().msg('a', '').msg('b', 'B').end()],
-    ['R empty (no lineage in legacy)', s().start().msg('a', 'I').start('stream_recovery', 0).end()],
+    ['R empty (no lineage in legacy)', s().start().msg('a', 'I').start('request_retry', 0).end()],
   ];
   for (const [name, script] of chains) {
     it(name, () => {
