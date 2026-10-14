@@ -13,15 +13,17 @@
  *    walked through `attempt_start.continues`). Attempts with
  *    `continues: null` other than `F` (e.g. a stale-resume attempt replaced by
  *    a fresh retry) are never eligible.
- *  - Selection pool `S` = `P` when `P` is non-empty, otherwise `L`. When `P` is
- *    non-empty the lineage contributes nothing to any rule.
+ *  - Selection pool `S` uses useful primary messages, otherwise useful lineage
+ *    messages. In final mode formatting-only text is not useful. Useful primary
+ *    output excludes lineage. An empty pool without ancestors is primary.
  *  - Messages with empty text are ignored. Mode final also ignores whitespace-only
  *    text when choosing the pool and candidates; compatibility modes do not.
  *
  * Selection table (top-down; the first non-empty result wins):
  *  - R1 `phase`: known `final_answer` messages of `S`.
  *  - Mode final then keeps the last non-commentary item (or last commentary
- *    fallback), recording last_message / last_message_partial. It stops here.
+ *    fallback), unless the substantive-loss guard retains non-commentary parts.
+ *    Partial, commentary and guarded fallbacks have distinct diagnostic sources.
  *  - R2 `trailing` (mode `heuristic` only; requires `S = P` and a completed
  *    turn): non-commentary messages of `S` whose first-sight seq is greater than
  *    the first-sight seq of the last work item of `F`. Abandoned for R3 when a
@@ -65,6 +67,10 @@ export type SelectionSource =
   | 'phase'
   | 'last_message'
   | 'last_message_partial'
+  | 'substantive_guard'
+  | 'substantive_guard_partial'
+  | 'commentary_last'
+  | 'commentary_last_partial'
   | 'trailing'
   | 'unclassified_all'
   | 'commentary_last_resort'
@@ -79,14 +85,15 @@ export interface SelectedOutput {
   pool: 'primary' | 'lineage';
   /** Item ids included, in seq order. */
   messageIds: string[];
-  /** Eligible non-empty messages that were not delivered (count only). */
+  /** Unselected candidates (count only). Final counts useful items in its pool;
+   * compatibility modes retain their historical cross-pool non-empty count. */
   droppedMessageCount: number;
   truncated: boolean;
   /** Reserved slot: there is no outbound attachment producer at this version. */
   artifacts: ReadonlyArray<never>;
 }
 
-/** Length floor of the substantive-loss guard (R2). */
+/** Length floor of the substantive-loss guard (final and R2). */
 export const SUBSTANTIVE_GUARD_MIN_CHARS = 400;
 
 const JOIN = '\n\n';
@@ -216,15 +223,25 @@ export class OutputCollector {
     const P = this.nonEmptyMessages(F);
     const lineage = this.lineageOf(F);
     const L = lineage.flatMap((a) => this.nonEmptyMessages(a)).sort(bySeq);
-    const eligibleCount = P.length + L.length;
-
     if (opts.mode === 'legacy') {
-      return this.finish(P, P.length > 0 ? 'legacy_all' : 'empty', 'primary', eligibleCount, opts.maxChars, '');
+      return this.finish(P, P.length > 0 ? 'legacy_all' : 'empty', 'primary', P.length + L.length, opts.maxChars, '');
     }
 
-    const pool: 'primary' | 'lineage' = P.some(m => opts.mode !== 'final' || m.text.trim().length > 0) ? 'primary' : 'lineage';
+    // Ignore formatting-only items in the default mode, without modifying text
+    // that contains visible content (including legitimate joiners inside words).
+    const useful = (m: CollectedMessage): boolean =>
+      opts.mode !== 'final' || /[^\s\p{Default_Ignorable_Code_Point}]/u.test(m.text);
+    const primary = P.filter(useful);
+    const inherited = L.filter(useful);
+    let pool: 'primary' | 'lineage' = 'primary';
+    if (opts.mode === 'final') {
+      if (primary.length === 0 && inherited.length > 0) pool = 'lineage';
+    } else if (P.length === 0) {
+      pool = 'lineage';
+    }
     const eligible = pool === 'primary' ? P : L;
-    const S = opts.mode === 'final' ? eligible.filter(m => m.text.trim().length > 0) : eligible;
+    const S = eligible.filter(useful);
+    const eligibleCount = opts.mode === 'final' ? S.length : P.length + L.length;
     const kFinal = S.filter((m) => m.phase === 'final_answer');
     const kComm = S.filter((m) => m.phase === 'commentary');
     const nonComm = S.filter((m) => m.phase !== 'commentary');
@@ -236,12 +253,28 @@ export class OutputCollector {
 
     // Exec JSONL 0.142/0.162 omits phase. This is an explicit ordering
     // fallback, not inferred provider intent. Preserve explicit multipart finals
-    // above; never concatenate all unlabeled progress in the default mode.
+    // above; retain unlabeled parts only when the loss guard detects a large drop.
     if (opts.mode === 'final') {
-      const last = (nonComm.length ? nonComm : kComm).at(-1);
-      const source = !last ? 'empty' : pool === 'lineage' || F.terminal !== 'completed'
-        ? 'last_message_partial' : 'last_message';
-      return this.finish(last ? [last] : [], source, pool, eligibleCount, opts.maxChars, JOIN);
+      const last = nonComm.at(-1);
+      const partial = pool === 'lineage' || F.terminal !== 'completed';
+      if (last) {
+        const threshold = Math.max(SUBSTANTIVE_GUARD_MIN_CHARS, 2 * last.text.length);
+        if (nonComm.some(m => m !== last && m.text.length > threshold)) {
+          const source = partial || nonComm.some(m => m.phase === 'partial_answer')
+            ? 'substantive_guard_partial' : 'substantive_guard';
+          return this.finish(nonComm, source, pool, eligibleCount, opts.maxChars, JOIN);
+        }
+        const source = partial || last.phase === 'partial_answer'
+          ? 'last_message_partial' : 'last_message';
+        return this.finish([last], source, pool, eligibleCount, opts.maxChars, JOIN);
+      }
+      // Commentary is a genuine last resort: a blank non-commentary item must
+      // not newly expose labeled narration merely because it was filtered out.
+      const commentary = eligible.every(m => m.phase === 'commentary') ? kComm.at(-1) : undefined;
+      if (commentary) {
+        return this.finish([commentary], partial ? 'commentary_last_partial' : 'commentary_last', pool, eligibleCount, opts.maxChars, JOIN);
+      }
+      return this.finish([], 'empty', pool, eligibleCount, opts.maxChars, JOIN);
     }
 
     // R2: trailing-run heuristic (opt-in).
@@ -272,7 +305,7 @@ export class OutputCollector {
   }
 
   private nonEmptyMessages(rec: AttemptRecord): CollectedMessage[] {
-    return [...rec.messages.values()].filter((m) => m.text.length > 0).sort(bySeq);
+    return [...rec.messages.values()].filter((m) => typeof m.text === 'string' && m.text.length > 0).sort(bySeq);
   }
 
   /** `continues` ancestors of `F`, excluding `F`. */

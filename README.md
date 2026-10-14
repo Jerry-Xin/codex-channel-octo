@@ -105,7 +105,7 @@ so the two always match. `sdk.outputSelection` controls the choice:
 
 | Value | Behavior |
 |---|---|
-| `final` (default) | Keeps all explicitly labeled final parts. Without final metadata, keeps only the last non-empty non-commentary item; commentary-only output uses the last commentary item. This is an ordering fallback, not inferred final intent. |
+| `final` (default) | Keeps all explicitly labeled final parts. Without final metadata, prefers the last useful non-commentary item; retains non-commentary parts when an earlier item exceeds `max(400, 2 × lastLength)` characters. Commentary-only output uses its last useful item. This is an ordering fallback, not inferred final intent. |
 | `phase` (compatibility) | Uses the runtime's final-answer label when present. Otherwise all non-commentary messages are delivered, separated by a blank line; commentary-only output retains those messages. **Codex SDK/CLI 0.142.3 labels no messages, so in this mode intermediate narration is still delivered.** |
 | `heuristic` (opt-in) | Keeps only the messages after the turn's last tool call / command / file change. It falls back to all messages when the turn did not complete, or when that would drop a long earlier message. This is an ordering heuristic, not a final-answer signal. |
 | `legacy` (rollback) | Previous behavior: all messages of the final run, concatenated with no separator. |
@@ -113,12 +113,19 @@ so the two always match. `sdk.outputSelection` controls the choice:
 **Default change:** an unset `sdk.outputSelection` now selects `final`. Explicit
 `phase`, `heuristic` and `legacy` configurations retain their prior behavior.
 Codex exec JSONL 0.142.3/0.162.1 omits phase metadata, so the default normally
-logs `source=last_message`. Unlabeled multipart answers may lose earlier parts;
+logs `source=last_message`. A short sign-off cannot hide an earlier item longer
+than `max(400, 2 × lastLength)` UTF-16 code units: `substantive_guard` retains the
+non-commentary parts. This can also retain long unlabeled progress before a short
+answer. A whole earlier answer below the guard threshold can still be replaced
+by a sign-off;
 use explicit `phase` if retaining all unlabeled parts is required. Explicit
 multipart finals are preserved. Snapshot updates replace the same item without
-changing first-seen order. Empty/whitespace items cannot erase useful output.
-An inherited or non-terminal last-message fallback logs `last_message_partial`;
-it is not proof that the task completed. See [the source investigation](docs/final-output-policy.md).
+changing first-seen order. Whitespace/default-ignorable-only items cannot erase useful output; embedded
+joiners in meaningful content are preserved.
+Inherited/non-terminal fallbacks and explicit `partial_answer` selections have
+partial diagnostic sources. Commentary-only fallbacks log `commentary_last`
+(or `commentary_last_partial`), and do not apply beside blank non-commentary
+items. These fallback labels are not proof that the task completed. See [the source investigation](docs/final-output-policy.md).
 
 When a stream interruption is recovered and the recovery run produces no
 message, the interrupted run's messages are used instead. These may be

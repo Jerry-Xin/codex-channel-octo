@@ -183,6 +183,28 @@ describe('output selection wiring', () => {
     expect(relayInputs()).toEqual(['two']);
   });
 
+  it('keeps a substantive answer in both delivery and history before a short sign-off', async () => {
+    const config = makeConfig();
+    setup(config);
+    const answer = 'answer '.repeat(200);
+    script([start(), m('a', 0, answer), w('tool', 1), m('b', 2, 'Done.'), end()]);
+    await run(config);
+    const expected = answer + '\n\nDone.';
+    expect(relayInputs()).toEqual([expected]);
+    expect(historyInputs()).toEqual([expected]);
+    expect(sentContents().join('')).toBe(expected);
+  });
+
+  it('returns the no-response notice without publishing or storing labeled commentary beside blank output', async () => {
+    const config = makeConfig();
+    setup(config);
+    script([start(), m('blank', 0, ' \n'), { ...m('c', 1, 'INTERNAL progress'), phase: 'commentary' }, end()]);
+    await run(config);
+    expect(historyInputs()).toEqual([]);
+    expect(sentContents()).toEqual(['[No response generated. Please try rephrasing your question.]']);
+    expect(sentContents().join('')).not.toContain('INTERNAL');
+  });
+
   it('T6: a throw after partial output → error notice, nothing delivered, nothing stored', async () => {
     const config = makeConfig();
     setup(config);
@@ -271,9 +293,9 @@ describe('output selection wiring', () => {
     }
   });
 
-  it('T10: mention entities are computed on the selected text only', async () => {
+  it.each(['final', 'heuristic'] as const)('T10: mention entities use selected text (%s)', async mode => {
     vi.mocked(getGroupMembers).mockResolvedValue([{ uid: 'uid-alice', name: 'Alice', role: 0, robot: 0 }]);
-    const config = makeConfig({}, { outputSelection: 'heuristic' });
+    const config = makeConfig({}, { outputSelection: mode });
     setup(config);
     groupContext.learnMember(GROUP, 'uid-alice', 'Alice');
     script([

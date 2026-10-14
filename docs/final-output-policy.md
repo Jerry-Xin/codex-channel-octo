@@ -22,18 +22,18 @@ The previous default phase mode therefore preserves all unknown messages in actu
 Add `sdk.outputSelection: "final"` and make it the runtime default when unset.
 
 1. Use the existing eligible attempt pool: the final attempt's messages, or its explicitly linked recovery ancestors when it produced none. Never inherit from an unrelated stale attempt.
-2. For this mode ignore whitespace-only messages without altering the bytes of selected nonblank text.
+2. For this mode ignore whitespace/default-ignorable-only messages without altering the bytes of selected nonblank text.
 3. If explicit final_answer messages exist, keep all of them in first-seen order with blank-line separators. Exclude commentary and partial_answer items.
-4. Otherwise keep the last non-commentary item by first-seen sequence. Updates to an old item replace its contents without moving it past a later item.
-5. If only commentary exists, keep its last item as an explicit useful fallback. If nothing useful exists, return empty and preserve the existing no-response notice.
-6. Log `phase` for explicitly labeled finals, `last_message` for the ordering fallback, and `last_message_partial` for inherited/non-terminal ordering fallback. No text is logged by selection diagnostics.
+4. Otherwise prefer the last non-commentary item by first-seen sequence. If an earlier non-commentary item exceeds `max(400, 2 × lastItemLength)` UTF-16 code units, retain all useful non-commentary parts in order instead (`substantive_guard`). This prevents a short sign-off from hiding a much longer answer. Updates replace contents without changing first-seen order.
+5. If the selected pool contains exclusively commentary items, keep its last useful item (`commentary_last`). A blank unknown/final/partial item in that pool prevents this fallback: filtering blanks must not newly expose labeled commentary. If nothing useful remains, return empty and preserve the existing no-response notice.
+6. Log `phase` for explicitly labeled finals, `last_message` for ordinary ordering fallback, and distinct `substantive_guard` / `commentary_last` sources for those fallbacks. Each fallback uses a `_partial` suffix for inherited/non-terminal output; explicitly selected `partial_answer` also uses a partial source even after `turn.completed`. Selection diagnostics log no text. In `final`, dropped counts cover only useful candidates in the selected pool; excluded ancestors and blank items are not reported as lost content. A pool with no useful primary or ancestor output is reported as `primary`.
 7. Apply the cap once and feed the identical selected text into delivery and history, preserving mention rendering and splitting behavior.
 
 Existing explicit phase/heuristic/legacy modes remain unchanged, including their own fallback rules. A newly recognized partial_answer is a non-commentary item, not a final signal. No dependency is patched and no reliable metadata is invented.
 
 ## Tradeoffs and migration
 
-This deliberately fixes the normal unlabeled-runtime path without claiming semantic certainty. The last unlabeled message may itself be progress/partial content; unlabeled multipart answers may lose earlier pieces. All explicitly labeled final parts are preserved. Users who require every unlabeled part can choose explicit phase; legacy retains separator-free concatenation. A future reliable transport can supply real phase metadata without changing the selection contract.
+This deliberately fixes the normal unlabeled-runtime path without claiming semantic certainty. The last unlabeled message may itself be progress/partial content. The length guard is a loss bound, not a semantic classifier: long unlabeled progress followed by a short answer also retains the progress. Conversely, earlier answer parts below the guard threshold can still be dropped; even an entire substantive answer can be replaced by a sign-off if it does not exceed that threshold. No threshold can reliably identify answers without transport metadata or a labeled-corpus evaluation. All explicitly labeled final parts are preserved. Users who require every unlabeled part can choose explicit phase; legacy retains separator-free concatenation. A future reliable transport can supply real phase metadata without changing the selection contract.
 
 Changing the code default affects only unset configurations after restart. Explicit phase remains phase: changing config is an operator action, not performed by this PR. Existing bot instances must restart to pick up either code or config changes. toolProgress is independent and unchanged.
 
@@ -43,4 +43,24 @@ Review invariants: no dependence on unavailable metadata, no text-pattern final 
 
 New regression tests first produced eight failures on the old implementation. Coverage includes unlabeled messages with/without tools, multiple trailing messages, snapshots, blank tails, explicit multipart finals, partial_answer, commentary-only fallback, recovery lineage, no-terminal attempts, unrelated fresh attempts, caps, compatibility modes and the actual SDK-event-to-bridge-to-selector boundary. Pipeline tests exercise default delivery/history parity with unknown phases. These are local/synthetic tests, not a live-provider phase guarantee or a labeled-corpus quality evaluation.
 
-Local validation: SDK 0.142.3 and 0.162.1 each passed 72 files / 1534 tests, plus type-check, zero-warning lint, build and package checks. The package includes this document and the executable JSONL proxy.
+Initial validation before review: SDK 0.142.3 and 0.162.1 each passed 72 files / 1534 tests, plus type-check, zero-warning lint, build and package checks. The package includes this document and the executable JSONL proxy.
+
+## RC follow-up
+
+The follow-up covers U+200B/U+2060 and other default-ignorable-only tails without
+stripping embedded joiners or changing meaningful text. It tests the guard's
+short-sign-off benefit and long-progress tradeoff, blank non-commentary plus
+labeled commentary, partial metadata, accurate pool/drop diagnostics, missing
+`item.started.text` through the real bridge, and mention offsets under the
+shipped default. Compatibility selection-table tests now state `phase` explicitly;
+the helper itself defaults to `DEFAULT_OUTPUT_SELECTION_MODE`. Missing/non-string
+message text is normalized defensively; this is a crash fix for every mode, not
+a new output eligibility policy for valid compatibility-mode input.
+
+Follow-up validation: SDK 0.142.3 and 0.162.1 each passed 72 files / 1559 tests;
+type-check, zero-warning lint, build and packing passed. Restoring the pre-review
+selector caused 22 failures in the new regression suite. A seeded 6000-stream
+comparison across `phase`, `heuristic` and `legacy` (18000 complete result
+comparisons, including snapshots, formatting tails, lineage, caps and terminal
+states) found zero differences for valid string-message inputs. No live-provider
+frequency claim or deployment is made by this follow-up.

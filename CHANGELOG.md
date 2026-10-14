@@ -29,12 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if they contain, equal, or sit inside a trusted/sensitive directory — the
   session cwd, the config/SOUL tree, `groupConfigDir`, the memory dir, or
   `codexHome` — so a writable root can never overlap the agent's trust anchors.
-- **`sdk.outputSelection`** (`phase` default, `heuristic` opt-in, `legacy`
-  rollback) selects one reply per turn from Codex's agent messages. Delivery
-  and stored history share that single selection. On Codex SDK/CLI 0.142.3 the
-  default `phase` mode still delivers intermediate narration, because no
-  final-answer label is emitted. Suppressing narration requires `heuristic`.
-  Applied at bot start (restart or re-add the bot after editing).
+- **`sdk.outputSelection`** (`final` default; `phase`, `heuristic` and `legacy`
+  compatibility modes) selects one reply shared by delivery and stored history.
+  Explicit final parts are preserved. Without labels, the last useful message
+  is selected, with a substantive-loss guard against short trailing sign-offs.
+  Commentary and partial fallbacks have distinct diagnostics. Applied at bot
+  start (restart or re-add the bot after editing).
 
 ### Changed
 
@@ -48,12 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supported.
 
 ### Fixed
-
-- Default to explicit-final-or-last-message reply selection for Codex exec JSONL
-  runtimes that omit phase, avoiding end-of-turn aggregation of progress text.
-  Preserve explicit compatibility modes and multipart labeled finals; distinguish
-  partial fallbacks and recognize internal partial_answer metadata defensively.
-
 
 - Keep Octo recovery alive after failed token refreshes and cooldown-suppressed
   requests, independently of successful REST heartbeats. Coalesce retry timers,

@@ -1,9 +1,9 @@
-import { OutputCollector, DEFAULT_OUTPUT_SELECTION_MODE } from '../output-selection.js';
 /**
  * agent-bridge typed-event tests (queryAgentEvents) — mocked @openai/codex-sdk.
  * Covers work identity / first-sight seq, message phase and revisions, attempt
  * markers across recovery and fresh retry, and the canonical options contract.
  */
+import { OutputCollector, DEFAULT_OUTPUT_SELECTION_MODE } from '../output-selection.js';
 import { describe, it, expect, expectTypeOf, vi, beforeEach } from 'vitest';
 
 type Ev = Record<string, unknown>;
@@ -352,15 +352,34 @@ describe('T25: one canonical options contract', () => {
 
 // The real bridge sees SDK-style id/type/text items with no phase property.
 describe('unlabeled SDK events through default output selection', () => {
-  it.each([false,true])('excludes progress (tool boundary=%s)',async withTool=>{
-    scriptedRuns=[async function*(){
-      yield started('thread');yield msg('progress','I will inspect the code.');
-      if(withTool) yield item('tool','command_execution','completed',{command:'true'});
-      yield msg('answer','The fix is complete.');yield turnDone;
+  it.each([false, true])('excludes progress (tool boundary=%s)', async withTool => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield msg('progress', 'I will inspect the code.');
+      if (withTool) yield item('tool', 'command_execution', 'completed', { command: 'true' });
+      yield msg('answer', 'The fix is complete.');
+      yield turnDone;
     }];
-    const collector=new OutputCollector();const observed=await events();
-    for(const event of observed) collector.push(event);
-    expect(observed.filter(e=>e.kind==='message').map(e=>e.phase)).toEqual(['unknown','unknown']);
-    expect(collector.select({mode:DEFAULT_OUTPUT_SELECTION_MODE,maxChars:1000})).toMatchObject({text:'The fix is complete.',source:'last_message',droppedMessageCount:1});
+    const collector = new OutputCollector();
+    const observed = await events();
+    for (const event of observed) collector.push(event);
+    expect(observed.filter(e => e.kind === 'message').map(e => e.phase)).toEqual(['unknown', 'unknown']);
+    expect(collector.select({ mode: DEFAULT_OUTPUT_SELECTION_MODE, maxChars: 1000 }))
+      .toMatchObject({ text: 'The fix is complete.', source: 'last_message', droppedMessageCount: 1 });
+  });
+
+  it('normalizes an agent_message started without text at the real bridge boundary', async () => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield msg('answer', 'Useful answer');
+      yield { type: 'item.started', item: { id: 'unfinished', type: 'agent_message' } };
+      yield turnDone;
+    }];
+    const observed = await events();
+    expect(observed.find(e => e.kind === 'message' && e.itemId === 'unfinished'))
+      .toMatchObject({ text: '' });
+    const collector = new OutputCollector();
+    observed.forEach(event => collector.push(event));
+    expect(collector.select({ mode: DEFAULT_OUTPUT_SELECTION_MODE, maxChars: 1000 }).text).toBe('Useful answer');
   });
 });
