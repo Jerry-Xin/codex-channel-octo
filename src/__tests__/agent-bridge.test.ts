@@ -1,4 +1,5 @@
 import { TurnFailure } from '../agent-failure.js';
+import { privateDiagnosticRow } from '../private-diagnostics.js';
 /**
  * agent-bridge (codex) tests — pure unit tests with a mocked @openai/codex-sdk.
  * No real codex process is spawned: we feed synthetic ThreadEvent streams and
@@ -576,3 +577,15 @@ describe('privileged marker framing after Unicode escape', () => {
     expect(prompts[0]).toContain('\\' + CURRENT_MESSAGE_ANCHOR);
   });
 });
+
+ describe('private diagnostic bridge wiring', () => {
+  it.each([false,true])('captures SDK failure provenance only when enabled=%s', async enabled => {
+    scriptedRuns = [async function* () { yield {type:'turn.failed',error:{message:'PRIVATE_SDK_FAILURE'}}; }];
+    let caught:unknown;
+    try { await collect(queryAgent('request',cfg({privateDiagnostics:enabled}))); } catch(error) {caught=error;}
+    expect(caught).toBeInstanceOf(TurnFailure);
+    const row=privateDiagnosticRow((caught as TurnFailure).report,caught);
+    if(enabled)expect(row).toMatchObject({sdk:{event:'turn.failed'}});else expect(row).not.toHaveProperty('sdk');
+    expect(JSON.stringify(row)).not.toContain('PRIVATE_SDK_FAILURE');expect(JSON.stringify(caught)).not.toContain('PRIVATE_SDK_FAILURE');expect(calls).toHaveLength(1);
+  });
+ });

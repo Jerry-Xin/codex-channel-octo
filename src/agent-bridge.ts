@@ -1,3 +1,4 @@
+import { rememberSdkFailure } from './private-diagnostics.js';
 import { recover, type RecoveryConfig } from './agent-recovery.js';
 import { AgentFailure, classifyFailure, type ExecutionRisk } from './agent-failure.js';
 /**
@@ -441,6 +442,12 @@ export async function* queryAgentEvents(
   let attemptCount = 0;
   let seq = 0;
 
+  const sdkFailure = (message: string, event: 'item.error' | 'turn.failed' | 'error'): AgentFailure => {
+    const error = new AgentFailure(classifyFailure(new Error(message), 'sdk_event'));
+    if (config.sdk.privateDiagnostics === true) rememberSdkFailure(error,event,message);
+    return error;
+  };
+
   // Drain one CLI execution; track positive effects independently from absence
   // of events. Only an actual OS spawn rejection can prove non-execution.
   async function* runOnce(
@@ -538,7 +545,7 @@ export async function* queryAgentEvents(
               // error so the turn doesn't silently produce zero output (which
               // would look like "no response") and so stale-resume detection can
               // run. Any side effect already seen suppresses retry.
-              throw new AgentFailure(classifyFailure(new Error(itemMsg), 'sdk_event'));
+              throw sdkFailure(itemMsg, 'item.error');
             }
           } else if (
             (item.type === 'reasoning' || item.type === 'todo_list') &&
@@ -559,9 +566,9 @@ export async function* queryAgentEvents(
           completed = true;
           break;
         case 'turn.failed':
-          throw new AgentFailure(classifyFailure(new Error(ev.error?.message ?? ''), 'sdk_event'));
+          throw sdkFailure(ev.error?.message ?? '', 'turn.failed');
         case 'error':
-          throw new AgentFailure(classifyFailure(new Error(ev.message ?? ''), 'sdk_event'));
+          throw sdkFailure(ev.message ?? '', 'error');
       }
     }
 
@@ -578,6 +585,7 @@ export async function* queryAgentEvents(
     if (starts++ > 0) attemptCtx = { reason: 'request_retry', continues: null };
     try { yield* runOnce(opts?.resume, promptText, sideEffect); }
     catch (error) {
+      if (config.sdk.privateDiagnostics === true && error instanceof Error) rememberSdkFailure(error,'exception',error.message);
       const failure = classifyFailure(error);
       // An OS spawn failure positively establishes that this process never ran.
       // No event absence, thread ID absence or sandbox setting is such evidence.

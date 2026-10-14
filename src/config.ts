@@ -129,6 +129,8 @@ export interface Config {
     toolProgress?: boolean;
     /** Bounded pre-execution recovery. Default disabled. */
     recovery?: RecoveryConfig;
+    /** Opt-in local failure metadata/fingerprints; never raw SDK or tool text. */
+    privateDiagnostics?: boolean;
     /**
      * How the user-facing reply is selected from a turn's agent messages:
      * - `phase` (default): known final answers when the runtime labels them,
@@ -734,6 +736,9 @@ function assertSdkEnums(id: string, sdk: Config['sdk']): void {
   check('webSearchMode', sdk.webSearchMode, ['disabled', 'cached', 'live']);
   check('outputSelection', sdk.outputSelection, ['phase', 'heuristic', 'legacy']);
   validateRecovery(sdk.recovery);
+  if (sdk.privateDiagnostics !== undefined && typeof sdk.privateDiagnostics !== 'boolean') {
+    throw new Error(`Bot "${id}": sdk.privateDiagnostics must be a boolean`);
+  }
 }
 
 /**
