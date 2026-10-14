@@ -155,6 +155,21 @@ describe("wire serialization", () => {
     expect(send("reasoning", { ...DATA, phases: [{ thought: "t", actions: Array(13).fill(DATA.phases[0].actions[0]) }] })).toThrow(/phases/);
   });
 
+  it("rejects malformed membership identifiers with a typed error before transport", async () => {
+    let calls = 0;
+    const api = createCardApi({
+      apiUrl: "https://api.example.com",
+      credential: "fixture-token",
+      fetchImpl: async () => { calls++; return json(200, { members: [] }); },
+    });
+    for (const groupNo of ["\ud800", "\udc00"]) {
+      const err = await failure(api.getFreshMembers(groupNo));
+      expect(err).toBeInstanceOf(CardRequestError);
+      expect(err.message).toBe("card api request rejected: invalid_request (group_no)");
+    }
+    expect(calls).toBe(0);
+  });
+
   it("rejects invalid routes, identities and oversized envelopes before transport", () => {
     expect(() => serializeSendRegistry({ route: { channelId: "", channelType: 2 }, clientMsgNo: CLIENT, ref: REF, state: "reasoning", data: DATA })).toThrow(/channel_id/);
     expect(() => serializeSendRegistry({ route: { channelId: "g", channelType: 3 as 2 }, clientMsgNo: CLIENT, ref: REF, state: "reasoning", data: DATA })).toThrow(/channel_type/);
