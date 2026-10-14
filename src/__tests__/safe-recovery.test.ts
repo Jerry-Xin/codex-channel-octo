@@ -8,7 +8,7 @@ describe('safe recovery eligibility and budgets',()=>{
  it('retries only a proven pre-execution failure, using one shared attempt budget',async()=>{
   let calls=0;const wait=vi.fn().mockResolvedValue(undefined);
   const out=await drain(recover(async function*(){if(++calls<3)throw temporary();yield 'ok';},{config:{enabled:true},risk:()=> 'proven_not_started',wait,random:()=>0.5}));
-  expect(out).toEqual(['ok']);expect(calls).toBe(3);expect(wait.mock.calls.map(c=>c[0])).toEqual([500,1000]);
+  expect(out).toEqual(['ok']);expect(calls).toBe(3);expect(wait.mock.calls.map(c=>c[0])).toEqual([750,1500]);
  });
  it('is disabled by default',async()=>{
   let calls=0;await expect(drain(recover(async function*(){calls++;throw temporary();},{risk:()=> 'proven_not_started'}))).rejects.toMatchObject({report:{attempts:1,decision:'not_attempted'}});expect(calls).toBe(1);
@@ -53,5 +53,14 @@ describe('fixed error categories and safe user feedback',()=>{
  });
  it('revokes late callback and synchronous store publication',()=>{
   const turn=new TurnContext(1000);const store={write:vi.fn()};const guarded=turn.guard(store);turn.cancel();expect(()=>guarded.write()).toThrow();expect(store.write).not.toHaveBeenCalled();
+ });
+});
+
+describe('equal jitter bounds', () => {
+ it('keeps a positive exponential floor and honors Retry-After', () => {
+  const failure = { stage: 'inference', category: 'network_transient', source: 'sdk_event', evidence: 'structured' } as const;
+  expect(retryDelay(failure, 1, RECOVERY_DEFAULTS, () => 0)).toBe(500);
+  expect(retryDelay(failure, 2, RECOVERY_DEFAULTS, () => 0)).toBe(1000);
+  expect(retryDelay(failure, 10, RECOVERY_DEFAULTS, () => 1)).toBe(RECOVERY_DEFAULTS.maxDelayMs);
  });
 });

@@ -126,7 +126,7 @@ describe("postJson default timeout", () => {
 
     await expect(
       postJson("https://api.example.com", "token", "/v1/bot/missing", {}),
-    ).rejects.toMatchObject({snapshot:{httpStatus:404,stage:'delivery'}});
+    ).rejects.toMatchObject({snapshot:{httpStatus:404,stage:'prepare',endpoint:'other'}});
   });
 
   it("returns undefined for empty response body", async () => {

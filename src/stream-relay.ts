@@ -292,7 +292,8 @@ export class StreamRelay {
             check();
             // The send endpoint can return a server-generated client_msg_no.
             // Correlate this acknowledgement through the awaited HTTP request;
-            // the returned key is not required to echo the submitted dedup key.
+            // the returned key need not echo our local correlation key. The bot
+            // endpoint does not establish idempotency from this request field.
             const id = confirmedMessageId(result?.message_id);
             const state = id ? 'confirmed' : 'unknown';
             lifecycle?.store.markDeliveryPart(lifecycle.turn.turnId, index, state, id);
@@ -301,7 +302,7 @@ export class StreamRelay {
           } catch (error) {
             if (lifecycle?.turn.signal.aborted) throw error;
             lifecycle?.store.markDeliveryPart(lifecycle.turn.turnId, index, 'unknown');
-            if (lifecycle) throw new AgentFailure({ stage: 'delivery', category: 'delivery_failed', source: 'octo_api', evidence: 'structured' });
+            if (lifecycle) throw error instanceof AgentFailure ? error : new AgentFailure({ stage: 'delivery', category: 'delivery_failed', source: 'octo_api', evidence: 'structured' });
             console.error(`[stream-relay] delivery failed: ${summarizeAgentError(error)}`);
           }
         }

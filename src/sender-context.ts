@@ -26,9 +26,24 @@ function senderMetadata(message: BotMessage, ownerUid: string) {
   return metadata;
 }
 
-/** Uses only transport fields and the registered owner binding, never body text. */
-export function isOwnerSender(message: BotMessage, ownerUid: string): boolean {
-  return senderMetadata(message, ownerUid).is_owner;
+/** Privileged authorization is narrower than advisory prompt metadata.
+ * A prefixed alias must appear in the server's registration owner channel;
+ * never infer a trusted space from the incoming sender or incoming channel.
+ */
+export function isOwnerSender(message: BotMessage, ownerUid: string, ownerChannelId = '', robotUid = ''): boolean {
+  if (isRegistrationOwner(message.from_uid, ownerUid)) return true;
+  const owner = normalizeOwnerUid(ownerUid);
+  const sender = normalizeOwnerUid(message.from_uid);
+  if (!owner || !sender || typeof ownerChannelId !== 'string' || ownerChannelId.length > 512) return false;
+  const endpoints = ownerChannelId.split('@');
+  if (endpoints.length > 2 || endpoints.some(endpoint => !normalizeOwnerUid(endpoint))) return false;
+  const aliases = endpoints.filter(endpoint => {
+    const space = transportSpaceId(endpoint, owner);
+    if (!space || !isRegistrationOwner(endpoint, owner, space)) return false;
+    return endpoints.length === 1 || endpoints.some(other => other !== endpoint
+      && (other === robotUid || other === `s${space}_${robotUid}`));
+  });
+  return aliases.length === 1 && sender === aliases[0];
 }
 export function buildSenderContext(message: BotMessage, ownerUid: string): SafeText {
   return safeSenderMetadata(senderMetadata(message, ownerUid));

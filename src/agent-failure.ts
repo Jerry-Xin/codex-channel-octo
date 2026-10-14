@@ -1,17 +1,26 @@
 /** Public diagnostics are closed snapshots, never exception messages or causes. */
 import { randomUUID } from 'node:crypto';
 export type FailureStage = 'prepare' | 'spawn' | 'inference' | 'jsonl_parse' | 'process_exit' | 'delivery' | 'history_commit' | 'cleanup';
-export type FailureCategory = 'network_transient' | 'stream_interrupted' | 'rate_limited' | 'quota_exhausted' | 'provider_unavailable' | 'auth' | 'permission' | 'context_limit' | 'invalid_encrypted_content' | 'invalid_config' | 'jsonl_incomplete' | 'jsonl_invalid' | 'proxy_bootstrap' | 'process_exit' | 'cancelled' | 'timeout' | 'delivery_failed' | 'history_failed' | 'unknown';
+export type FailureCategory = 'network_transient' | 'stream_interrupted' | 'rate_limited' | 'quota_exhausted' | 'provider_unavailable' | 'auth' | 'permission' | 'context_limit' | 'invalid_encrypted_content' | 'invalid_config' | 'jsonl_incomplete' | 'jsonl_invalid' | 'proxy_bootstrap' | 'process_exit' | 'cancelled' | 'timeout' | 'delivery_failed' | 'api_failed' | 'history_failed' | 'unknown';
 export type ExecutionRisk = 'proven_not_started' | 'effects_observed' | 'unknown';
 export type RecoveryDecision = 'not_attempted' | 'blocked_uncertain' | 'exhausted' | 'cancelled' | 'fresh_retried';
+export type OctoEndpoint = '/v1/bot/sendMessage' | '/v1/bot/register' | '/v1/bot/typing'
+  | '/v1/bot/heartbeat' | '/v1/bot/readReceipt' | '/v1/bot/messages/sync'
+  | '/v1/bot/upload/credentials' | '/v1/bot/groups/:group/md'
+  | '/v1/bot/groups/:group/threads/:thread/md' | '/v1/bot/groups/:group/mention_pref'
+  | '/v1/bot/groups/:group/members' | 'other';
 export interface FailureSnapshot {
   stage: FailureStage; category: FailureCategory; source: 'sdk_event' | 'sdk_exception' | 'octo_api' | 'local';
   evidence: 'structured' | 'recognized_text' | 'unknown';
   httpStatus?: number; retryAfterMs?: number;
+  endpoint?: OctoEndpoint;
+  detail?: 'http_status' | 'invalid_json' | 'response_read' | 'network';
 }
 export class AgentFailure extends Error {
   constructor(readonly snapshot: Readonly<FailureSnapshot>) {
-    super(`Agent failure: ${snapshot.category}`);
+    super(snapshot.endpoint
+      ? `Octo API ${snapshot.endpoint} failed (${snapshot.httpStatus ?? 'network'}): ${snapshot.category}${snapshot.detail ? `/${snapshot.detail}` : ''}`
+      : `Agent failure: ${snapshot.category}`);
     this.name = 'AgentFailure';
   }
 }

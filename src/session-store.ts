@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS turn_execution (
   state TEXT NOT NULL CHECK(state IN ('active','clean','quarantined')),
   updated_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS turn_execution_turn_idx ON turn_execution(turn_id);
 CREATE TABLE IF NOT EXISTS turn_outputs (
   turn_id TEXT PRIMARY KEY, session_key TEXT NOT NULL, content TEXT NOT NULL,
   message_seq INTEGER, bot_name TEXT, state TEXT NOT NULL DEFAULT 'generated',
@@ -142,6 +143,9 @@ export class SessionStore {
     const row = this.adapter.prepare('SELECT state FROM turn_execution WHERE session_key = ?').get(session) as { state: string } | undefined;
     return row?.state === 'quarantined' || row?.state === 'active';
   }
+  getTurnState(session: string): 'active' | 'quarantined' | 'clean' | undefined {
+    return (this.adapter.prepare('SELECT state FROM turn_execution WHERE session_key=?').get(session) as {state:'active' | 'quarantined' | 'clean'} | undefined)?.state;
+  }
   getQuarantinedTurnId(session: string): string | undefined {
     return (this.adapter.prepare("SELECT turn_id FROM turn_execution WHERE session_key=? AND state IN ('active','quarantined')").get(session) as {turn_id:string} | undefined)?.turn_id;
   }
@@ -168,7 +172,7 @@ export class SessionStore {
   saveDeliveryParts(turnId: string, parts: Array<{ clientMsgNo: string; payload: string }>): void {
     this.adapter.transaction(() => parts.forEach((part,index) => this.saveDeliveryPart(turnId,index,part.clientMsgNo,part.payload)))();
   }
-  /** Operator-only reconciliation; never exposed through /reset or a chat command. */
+  /** Exact-turn reconciliation after external checks; /reset never calls this. */
   reconcileTurn(session: string, turnId: string): boolean {
     return this.adapter.prepare("UPDATE turn_execution SET state='clean', updated_at=? WHERE session_key=? AND turn_id=? AND state='quarantined'").run(Date.now(),session,turnId).changes === 1;
   }
@@ -328,8 +332,13 @@ export class SessionStore {
     const cutoff = Date.now() - SEVEN_DAYS_MS;
     // Keep unresolved execution evidence; completed tombstones can expire.
     this.adapter.prepare("DELETE FROM turn_execution WHERE state='clean' AND updated_at < ?").run(cutoff);
-    this.adapter.prepare('DELETE FROM delivery_parts WHERE turn_id IN (SELECT turn_id FROM turn_outputs WHERE created_at < ?)').run(cutoff);
-    this.adapter.prepare('DELETE FROM turn_outputs WHERE created_at < ?').run(cutoff);
+    // The admission tombstone and the evidence needed for reconciliation share
+    // retention. Reset remains an explicit content deletion, not a release.
+    const expiredOutput = `SELECT o.turn_id FROM turn_outputs o WHERE o.created_at < ?
+      AND NOT EXISTS (SELECT 1 FROM turn_execution e
+        WHERE e.turn_id=o.turn_id AND e.state IN ('active','quarantined'))`;
+    this.adapter.prepare(`DELETE FROM delivery_parts WHERE turn_id IN (${expiredOutput})`).run(cutoff);
+    this.adapter.prepare(`DELETE FROM turn_outputs WHERE turn_id IN (${expiredOutput})`).run(cutoff);
     const result = this.deleteExpired.run(cutoff);
     // Expire the SDK-session mapping on the same 7-day TTL. sdk_sessions is a
     // separate table (no FK cascade to sessions), so without this a stale mapping

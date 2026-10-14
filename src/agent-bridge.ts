@@ -293,12 +293,12 @@ export type MessagePhase = 'commentary' | 'final_answer' | 'unknown';
  *   (`item.started` or `item.completed`, whichever comes first). Later updates,
  *   completion or reconciled completion of that item never emit another one.
  *   Carries the item type only — never command, arguments, output or text.
- * - `attempt_start`/`attempt_end` bracket each Codex run. `continues` is the
- *   attempt whose thread a stream recovery resumes (`null` otherwise).
+ * - `attempt_start`/`attempt_end` bracket each Codex run. The current bridge
+ *   emits `continues: null` only: it never resumes/replays an uncertain turn.
  *   `terminal` is `completed` only when `turn.completed` was seen.
  */
 export type AgentOutputEvent =
-  | { kind: 'attempt_start'; attempt: number; reason: 'initial' | 'stream_recovery' | 'fresh_retry' | 'request_retry'; continues: number | null }
+  | { kind: 'attempt_start'; attempt: number; reason: 'initial' | 'request_retry'; continues: number | null }
   | { kind: 'message'; attempt: number; itemId: string; seq: number; text: string; phase: MessagePhase }
   | { kind: 'work'; attempt: number; itemId: string; seq: number; itemType: string }
   | { kind: 'attempt_end'; attempt: number; terminal: 'completed' | 'no_terminal' };
