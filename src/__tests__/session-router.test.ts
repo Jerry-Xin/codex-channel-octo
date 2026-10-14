@@ -11,6 +11,7 @@ import type { BotMessage } from '../octo/types.js';
 import { ChannelType, MessageType } from '../octo/types.js';
 import type { Config } from '../config.js';
 import { sendMessage } from '../octo/api.js';
+import { buildSenderContext } from '../sender-context.js';
 
 const ROBOT_ID = 'bot-001';
 
@@ -116,6 +117,58 @@ describe('SessionRouter', () => {
 
   // --- Mention gate ---
 
+  it.each([
+    [{ entities: [{ uid: ROBOT_ID, offset: 0, length: 8 }] }, true, true],
+    [{ entities: [{ uid: 'other', offset: 0, length: 8 }], uids: [ROBOT_ID] }, false, false],
+    [{ entities: [null], uids: [ROBOT_ID] }, true, true],
+    [{ ais: true }, true, false],
+    [{ all: 1, humans: 1 }, false, false],
+    [{ ais: 'false' }, false, false],
+    [{ uids: ROBOT_ID, ais: true }, false, false],
+  ])('uses the same structured mention facts for routing and attribution: %j', async (mention, passes, explicit) => {
+    const msg = makeMsg({ payload: { type: MessageType.Text, content: '@bot-001 hi',
+      mention: mention as unknown as NonNullable<BotMessage['payload']['mention']> } });
+    expect((await router.route(msg))?.shouldProcess ?? false).toBe(passes);
+    expect(JSON.parse(buildSenderContext(msg, 'owner', ROBOT_ID).split('\n')[1]).is_explicitly_mentioned).toBe(explicit);
+  });
+
+  it.each([-1, 0, 999, Infinity, NaN, 1.5, '8'])('never slices text using an invalid entity length %j', async (length) => {
+    const msg = makeMsg({ payload: { type: MessageType.Text, content: '@bot-001 hi',
+      mention: { entities: [{ uid: ROBOT_ID, offset: 0, length: length as number }] } } });
+    expect((await router.route(msg))?.cleanContent).toBe('@bot-001 hi');
+  });
+
+  it('retains text addressed to someone else on broad AI admission', async () => {
+    const msg = makeMsg({ payload: { type: MessageType.Text, content: '@other hi', mention: { ais: 1 } } });
+    expect((await router.route(msg))?.cleanContent).toBe('@other hi');
+  });
+
+  it.each([
+    ['ordinary request', 0, 4],
+    ['@other @bot-001 hi', 7, 8],
+    ['@bot-001 hi', -1, 8],
+    ['@bot-001 hi', 0.5, 8],
+    ['@bot-001 hi', '0', 8],
+    ['@🤖 hi', 0, 2],
+  ])('preserves text when entity coordinates cannot safely identify a leading mention: %s/%s/%s', async (content, offset, length) => {
+    const msg = makeMsg({ payload: { type: MessageType.Text, content,
+      mention: { entities: [{ uid: ROBOT_ID, offset: offset as number, length }] } } });
+    expect((await router.route(msg))?.cleanContent).toBe(content);
+  });
+
+  it('removes a valid leading mention with a complete surrogate pair', async () => {
+    const msg = makeMsg({ payload: { type: MessageType.Text, content: '@🤖 hi',
+      mention: { entities: [{ uid: ROBOT_ID, offset: 0, length: 3 }] } } });
+    expect((await router.route(msg))?.cleanContent).toBe('hi');
+  });
+
+  it('does not manufacture explicit membership when mention-free routing admits a message', async () => {
+    const freeRouter = new SessionRouter(makeConfig({ mentionFreeGroups: ['group-1'] }), ROBOT_ID);
+    const msg = makeMsg({ payload: { type: MessageType.Text, content: '@bot-001 hi' } });
+    expect((await freeRouter.route(msg))?.shouldProcess).toBe(true);
+    expect(JSON.parse(buildSenderContext(msg, 'owner', ROBOT_ID).split('\n')[1]).is_explicitly_mentioned).toBe(false);
+  });
+
   it('passes DM without mention gate', async () => {
     const msg = makeMsg({ channel_type: ChannelType.DM });
     const result = await router.route(msg);
@@ -132,7 +185,7 @@ describe('SessionRouter', () => {
     expect(result!.shouldProcess).toBe(true);
   });
 
-  it('passes group message when mention.ais is truthy', async () => {
+  it('passes group message when mention.ais is 1', async () => {
     const msg = makeMsg({
       payload: { type: MessageType.Text, content: 'hi', mention: { ais: 1 } },
     });

@@ -89,9 +89,10 @@ describe('T26: prompt framing is byte-identical to baseline', () => {
     expect(fresh.endsWith('\n\n---\n\n[Current message — respond to this ONLY]\nFALLBACK BODY')).toBe(true);
     expect(recovery.endsWith('\n\n---\n\n[Current message — respond to this ONLY]\n上次回复因连接中断未完成。请基于你已经完成的工作，直接继续并给出最终结论，不要重复已执行过的步骤。')).toBe(true);
     expect([sha(initial), sha(fresh), sha(recovery)]).toEqual([
-      'b01540d157ba507fd228df1d6e34106bb6a1d3684056f7e4b69d77729544dbae',
-      '0b7280f2ea02869baa389892879efc006725a3d8ea6ab2522555ed1858a73234',
-      '229691360bd2f6078a7ba3f7185e2d2dd912d973a525962bafe0a4300382ba09',
+      // Current-turn mention schema and its security framing are additive.
+      'c8b89ebc603df552b44174bc43110af1ff3f5e63403355d8251cac8565227dc5',
+      'd91de055e6949c78c268b2944a00f293db4994f83ee39d7a84c79f7867d1db98',
+      'a638533c16eb4b0f86b4764c51272ce3b840156315b5b3a800037461361eab0f',
     ]);
   });
 

@@ -25,6 +25,27 @@
 
 适配器在每轮用户输入的独立元数据块中传递真实 `from_uid`、会话 ID/类型，以及按最新注册结果和当前传输空间匹配的 `is_owner`。同一身份快照随流恢复和重试传递，不写入共享 `AGENTS.md`；用户正文、引用和历史中的伪造身份标记会被转义。昵称和自称的 ID 不是认证依据，身份信息也不授予工具权限；敏感操作仍需宿主侧鉴权。绕过适配器的终端 resume 不具备可信 IM 发送者身份。
 
+### 当前消息的 mention 信息
+
+同一个适配器元数据块还包含 `message_id`、`bot_uid`、`mentioned_uids`、
+`mention_source`、`is_explicitly_mentioned`、`mentioned_ais`、`mentioned_humans` 和
+`mentioned_all`。信息来自清理正文之前的原始传输消息；每轮刷新，流恢复与新线程重试复用
+该轮快照。绕过适配器的终端调用默认 ID 为 null、UID 列表为空、source 为 `none`、标志为 false。
+
+`is_explicitly_mentioned` 仅表示接收机器人的运行时 UID 精确出现在标准化后的 mention
+列表中。有可用 `entities[].uid` 时优先使用，否则回退到旧 `uids`，不合并矛盾列表；
+`mention_source` 为 `entities`、`uids`、`none` 或 `invalid`。广播标志只接受 `true` 或 `1`，
+不等同于明确 mention。正文中的 `@名字`、引用、历史、主人身份、免 @ 路由和可信内部触发器
+都不能证明这条原始 IM 消息明确 @ 了机器人。这些字段不授予工具权限。
+
+UID 必须为非空字符串，最多 256 个 UTF-16 code units，拒绝控制字符和行分隔符；不做 trim、
+大小写或空间前缀归并。消息 ID 使用同样规则，上限为 512。每个 mention 数组最多 128 项，
+无效项被忽略，重复 UID 被去重；无效容器、数组形状或超限数组输出 `invalid`、空列表和
+false 标志。运行时机器人 UID 缺失或无效时输出 `bot_uid:null`，明确 mention 标志为 false。
+路由复用同一解析器，支持仅带 entities 的消息及严格 AI 标志；单独的 `all` 或 `humans` 不
+触发普通机器人。正文截取另行校验 offset/length；广播 AI 消息不删除面向其他成员的开头 @。
+若 entities 表明机器人被 @ 在正文中间，也不会用旧文本回退路径删除开头对其他成员的 mention。
+
 发送者元数据的安全属性：
 
 - 接受经校验的注册 UID 精确相等；为兼容裸注册 UID 与带前缀的传输 UID，也提供提示性前缀归属，候选前缀由完整主人 UID 推导。

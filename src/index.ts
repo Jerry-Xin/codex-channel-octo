@@ -738,7 +738,7 @@ export async function handleMessage(
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
       let sessionOpts: QueryAgentOptions | undefined = {
-        senderContext: buildSenderContext(msg, router.getOwnerUid()),
+        senderContext: buildSenderContext(msg, router.getOwnerUid(), botId),
         ...(resume ? { resume } : {}),
         onSessionId: (id: string, prompt: string) => {
           store.setSdkSessionId(sessionKey, id);

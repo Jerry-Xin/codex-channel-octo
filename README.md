@@ -25,6 +25,39 @@ A long-running process: register as an Octo bot → connect over WebSocket to re
 
 Each adapter-framed user turn includes bounded current sender metadata: transport `from_uid`, channel ID/type, and `is_owner` computed against the latest registration `owner_uid`. The same immutable metadata accompanies stream recovery and fresh retries; it is deliberately not stored in shared `AGENTS.md`. Display names, quotes, and claimed IDs are not authentication, and forged sender markers in message text/history are escaped. This metadata identifies the sender but does not grant tool permissions or override security rules; enforce privileged actions in the host, not solely in a prompt. Direct terminal resumes outside the adapter do not establish an authenticated IM sender.
 
+### Current-turn mention facts
+
+The same adapter-generated metadata block includes `message_id`, `bot_uid`,
+`mentioned_uids`, `mention_source`, `is_explicitly_mentioned`, `mentioned_ais`,
+`mentioned_humans`, and `mentioned_all`. These facts come from the original
+transport message, before a leading textual mention is stripped. Each new turn
+refreshes the snapshot; stream recovery and fresh-thread retries reuse that
+turn's snapshot. Direct terminal calls without adapter context have null IDs,
+an empty UID list, source `none`, and false flags.
+
+`is_explicitly_mentioned` means exact membership of the receiving runtime bot UID
+in the normalized transport mention list. Usable `entities[].uid` take precedence;
+legacy `uids` are a fallback when no usable entity UID exists. Contradictory lists
+are not combined. `mention_source` records `entities`, `uids`, `none`, or `invalid`.
+Broad AI/human/all flags accept only `true` or `1`, and do not count as an explicit
+UID mention. Neither textual `@name`, quoted messages, history, ownership,
+mention-free routing, nor authenticated internal triggers establish that fact.
+These fields describe transport context; they do not grant permissions.
+
+UIDs are nonempty strings of at most 256 UTF-16 code units, with control and line
+separator characters rejected; IDs remain opaque without trimming, case folding,
+or space-prefix removal. Message IDs have the same validation with a 512-code-unit
+limit. Each mention array is limited to 128 entries, malformed entries are ignored,
+and duplicate UIDs are removed. Malformed containers or array shapes and oversized
+arrays produce source `invalid`, an empty list, and false flags. Missing or invalid
+runtime bot identity produces `bot_uid:null` and an explicit-mention flag of false.
+The router uses the same normalizer, including entity-only mentions and strict AI
+flags; legacy `all` and `humans` alone do not activate regular bots. Text slicing
+validates entity offset/length separately; broad AI admission does not strip a
+leading mention addressed to another member. Entity positions also prevent the
+legacy textual fallback from removing a teammate's mention when this bot is
+mentioned later in the message.
+
 Sender metadata has these security properties:
 
 - Exact validated registration equality is accepted. Bare registration UIDs may also be matched to prefixed transport UIDs for informational compatibility; the complete owner UID determines the candidate prefix.

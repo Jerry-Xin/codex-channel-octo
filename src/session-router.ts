@@ -3,10 +3,11 @@
  */
 
 import type { Config } from './config.js';
-import type { BotMessage, MentionEntity } from './octo/types.js';
+import type { BotMessage } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
 import { isAuthenticCronFire } from './cron-fire-marker.js';
+import { normalizeInboundMention } from './inbound-mention.js';
 import { MentionPreferences } from './mention-prefs.js';
 import { summarizeAgentError } from './agent-errors.js';
 import { ConversationMarkdown, type ConversationTurnContext } from './conversation-md.js';
@@ -331,12 +332,9 @@ export class SessionRouter {
   }
 
   private isMentioned(msg: BotMessage): boolean {
-    const mention = msg.payload.mention;
-    if (!mention) return false;
-    if (mention.uids?.includes(this.robotId)) return true;
+    const mention = normalizeInboundMention(msg.payload.mention, this.robotId);
     // Note: mention.all is a humans-only signal (@所有人), bots do NOT respond.
-    if (mention.ais) return true;
-    return false;
+    return mention.is_explicitly_mentioned || mention.mentioned_ais;
   }
 
   /**
@@ -478,19 +476,25 @@ export class SessionRouter {
       cleanContent = content;
       if (this.isGroupLike(msg.channel_type)) {
         const mention = msg.payload.mention;
+        const metadata = normalizeInboundMention(mention, this.robotId);
         // Path 1: entities-based removal (precise offset/length).
-        if (mention?.entities && Array.isArray(mention.entities)) {
+        if (metadata.is_explicitly_mentioned && metadata.mention_source === 'entities'
+          && Array.isArray(mention?.entities)) {
           const botEntity = mention.entities.find(
-            (e: MentionEntity) => e.uid === this.robotId && e.offset === 0,
+            (e) => e !== null && typeof e === 'object' && !Array.isArray(e)
+              && e.uid === this.robotId && e.offset === 0 && Number.isSafeInteger(e.length)
+              && e.length > 0 && e.length <= content.length && content.startsWith('@')
+              // Do not split a UTF-16 surrogate pair at the removal boundary.
+              && (content.codePointAt(e.length - 1) ?? 0) <= 0xffff,
           );
-          if (botEntity && typeof botEntity.length === 'number') {
+          if (botEntity) {
             cleanContent = content.substring(botEntity.length).trimStart();
           }
         }
-        // Path 2: regex fallback — only when the bot was explicitly @mentioned.
+        // Path 2: legacy UID-only fallback — never override entity positions.
         // In mention-free groups (G12) where the bot wasn't @'d, do NOT touch
         // the message — a leading @ is addressed to someone else.
-        if (cleanContent === content && this.isMentioned(msg)) {
+        if (cleanContent === content && metadata.is_explicitly_mentioned && metadata.mention_source === 'uids') {
           cleanContent = content.replace(/^@\S+\s*/, '').trimStart();
         }
         // If stripping emptied the content, keep original.

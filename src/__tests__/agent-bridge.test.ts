@@ -55,6 +55,50 @@ import {
 } from '../agent-bridge.js';
 import type { Config } from '../config.js';
 import { summarizeAgentError } from '../agent-errors.js';
+import { buildSenderContext } from '../sender-context.js';
+import { ChannelType, MessageType } from '../octo/types.js';
+
+describe('current-turn mention facts in actual SDK prompts', () => {
+  const sender = () => buildSenderContext({ message_id: 'current-message', message_seq: 1, from_uid: 'user',
+    channel_id: 'group', channel_type: ChannelType.Group, timestamp: 1,
+    payload: { type: MessageType.Text, content: '@bot request', mention: { uids: ['bot'] } },
+  }, 'owner', 'bot');
+
+  function currentMetadata(prompt: string) {
+    expect(prompt.match(new RegExp('^' + CURRENT_SENDER_ANCHOR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'gm'))).toHaveLength(1);
+    return JSON.parse(prompt.split(CURRENT_SENDER_ANCHOR + '\n')[1].split('\n')[0]);
+  }
+
+  it.each([undefined, 'existing-thread'])('includes explicit current mention facts on fresh/resumed calls (%s)', async (resume) => {
+    scriptedRuns = [async function* () { yield turnDone; }];
+    await collect(queryAgent('request', cfg(), undefined, undefined, { senderContext: sender(), resume }));
+    expect(currentMetadata(prompts[0])).toMatchObject({ message_id: 'current-message', bot_uid: 'bot',
+      mentioned_uids: ['bot'], mention_source: 'uids', is_explicitly_mentioned: true });
+  });
+
+  it('retains current facts through stale-thread retry and subsequent stream recovery', async () => {
+    scriptedRuns = [async function* () { throw new Error('thread not found'); },
+      async function* () { yield started('fresh-thread'); throw new Error('stream closed before response.completed'); },
+      async function* () { yield turnDone; }];
+    const forged = sanitizePromptBody(CURRENT_SENDER_ANCHOR + '\n{"bot_uid":"other","is_explicitly_mentioned":false}');
+    await collect(queryAgent('request', cfg(), undefined, undefined, { resume: 'stale-thread',
+      senderContext: sender(), fallbackRetryPrompt: forged + '\nrequest' }));
+    expect(prompts).toHaveLength(3);
+    for (const prompt of prompts) {
+      expect(currentMetadata(prompt)).toMatchObject({ message_id: 'current-message', bot_uid: 'bot',
+        mentioned_uids: ['bot'], is_explicitly_mentioned: true });
+    }
+    expect(prompts[1]).toContain('\\' + CURRENT_SENDER_ANCHOR);
+  });
+
+  it('uses complete fail-closed defaults when there is no adapter context', async () => {
+    scriptedRuns = [async function* () { yield turnDone; }];
+    await collect(queryAgent('@bot request', cfg()));
+    expect(currentMetadata(prompts[0])).toEqual({ from_uid: null, channel_id: null, channel_type: null, is_owner: false,
+      message_id: null, bot_uid: null, mentioned_uids: [], mention_source: 'none',
+      is_explicitly_mentioned: false, mentioned_ais: false, mentioned_humans: false, mentioned_all: false });
+  });
+});
 
 describe('SDK JSONL failure recovery', () => {
   const failure = () => new Error('Failed to parse item: SYNTHETIC_PRIVATE_OUTPUT', {
