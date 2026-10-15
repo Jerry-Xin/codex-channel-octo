@@ -4,6 +4,7 @@ import { TurnFailure } from '../agent-failure.js';
  * Covers work identity / first-sight seq, message phase and revisions, attempt
  * markers across recovery and fresh retry, and the canonical options contract.
  */
+import { OutputCollector, DEFAULT_OUTPUT_SELECTION_MODE } from '../output-selection.js';
 import { describe, it, expect, expectTypeOf, vi, beforeEach } from 'vitest';
 
 type Ev = Record<string, unknown>;
@@ -149,10 +150,11 @@ describe('message events', () => {
       yield msg('item_1', 'b', { phase: 'commentary' });
       yield msg('item_2', 'c', { phase: 'final_answer' });
       yield msg('item_3', 'd', { phase: 'something_else' });
+      yield msg('item_4', 'e', { phase: 'partial_answer' });
       yield turnDone;
     }];
     const phases = (await events()).filter((e) => e.kind === 'message').map((e) => (e as { phase: string }).phase);
-    expect(phases).toEqual(['unknown', 'commentary', 'final_answer', 'unknown']);
+    expect(phases).toEqual(['unknown', 'commentary', 'final_answer', 'unknown', 'partial_answer']);
   });
 
   it('T2: a snapshot of the same item keeps its first-sight seq', async () => {
@@ -254,4 +256,38 @@ describe('T25: one canonical options contract', () => {
  const session=vi.fn();scriptedRuns=[async function*(){yield started('t');yield turnDone;}];
  await events({resume:'t',onSessionId:session});expect(session).toHaveBeenCalledWith('t',expect.stringContaining('hi'));
  });
+});
+
+// The real bridge sees SDK-style id/type/text items with no phase property.
+describe('unlabeled SDK events through default output selection', () => {
+  it.each([false, true])('excludes progress (tool boundary=%s)', async withTool => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield msg('progress', 'I will inspect the code. '.repeat(500));
+      if (withTool) yield item('tool', 'command_execution', 'completed', { command: 'true' });
+      yield msg('answer', 'The fix is complete.');
+      yield turnDone;
+    }];
+    const collector = new OutputCollector();
+    const observed = await events();
+    for (const event of observed) collector.push(event);
+    expect(observed.filter(e => e.kind === 'message').map(e => e.phase)).toEqual(['unknown', 'unknown']);
+    expect(collector.select({ mode: DEFAULT_OUTPUT_SELECTION_MODE, maxChars: 1000 }))
+      .toMatchObject({ text: 'The fix is complete.', source: 'last_message', droppedMessageCount: 1 });
+  });
+
+  it('normalizes an agent_message started without text at the real bridge boundary', async () => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield msg('answer', 'Useful answer');
+      yield { type: 'item.started', item: { id: 'unfinished', type: 'agent_message' } };
+      yield turnDone;
+    }];
+    const observed = await events();
+    expect(observed.find(e => e.kind === 'message' && e.itemId === 'unfinished'))
+      .toMatchObject({ text: '' });
+    const collector = new OutputCollector();
+    observed.forEach(event => collector.push(event));
+    expect(collector.select({ mode: DEFAULT_OUTPUT_SELECTION_MODE, maxChars: 1000 }).text).toBe('Useful answer');
+  });
 });

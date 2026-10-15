@@ -48,12 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if they contain, equal, or sit inside a trusted/sensitive directory — the
   session cwd, the config/SOUL tree, `groupConfigDir`, the memory dir, or
   `codexHome` — so a writable root can never overlap the agent's trust anchors.
-- **`sdk.outputSelection`** (`phase` default, `heuristic` opt-in, `legacy`
-  rollback) selects one reply per turn from Codex's agent messages. Delivery
-  and stored history share that single selection. On Codex SDK/CLI 0.142.3 the
-  default `phase` mode still delivers intermediate narration, because no
-  final-answer label is emitted. Suppressing narration requires `heuristic`.
-  Applied at bot start (restart or re-add the bot after editing).
+- **`sdk.outputSelection`** (`final` default; `phase`, `heuristic` and `legacy`
+  compatibility modes) selects one reply shared by delivery and stored history.
+  Explicit final parts are preserved. Without labels, the last useful message
+  is selected regardless of earlier message lengths, preventing long progress
+  narration from being restored before a short answer. Unlabeled multipart
+  answers may lose earlier parts; explicit compatibility modes remain available.
+  Commentary and partial fallbacks have distinct diagnostics. Applied at bot
+  start (restart or re-add the bot after editing).
 
 ### Changed
 

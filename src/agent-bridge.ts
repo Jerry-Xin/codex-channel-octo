@@ -279,7 +279,7 @@ function isSideEffectItem(type: ThreadItem['type']): boolean {
 }
 
 /** Output intent of an agent message, read defensively from the raw item. */
-export type MessagePhase = 'commentary' | 'final_answer' | 'unknown';
+export type MessagePhase = 'commentary' | 'partial_answer' | 'final_answer' | 'unknown';
 
 /**
  * Typed bridge output. Errors still propagate as thrown exceptions.
@@ -327,7 +327,7 @@ const NON_WORK_ITEM_TYPES = new Set(['agent_message', 'reasoning', 'todo_list', 
 
 function readPhase(item: ThreadItem): MessagePhase {
   const phase = (item as { phase?: unknown }).phase;
-  return phase === 'commentary' || phase === 'final_answer' ? phase : 'unknown';
+  return phase === 'commentary' || phase === 'partial_answer' || phase === 'final_answer' ? phase : 'unknown';
 }
 
 /**
@@ -522,8 +522,9 @@ export async function* queryAgentEvents(
             }
           } else if (item.type === 'agent_message') {
             const s = sight(item.id);
-            latestText.set(item.id, item.text);
-            yield { kind: 'message', attempt, itemId: item.id, seq: s.seq, text: item.text, phase: readPhase(item) };
+            const text = typeof item.text === 'string' ? item.text : '';
+            latestText.set(item.id, text);
+            yield { kind: 'message', attempt, itemId: item.id, seq: s.seq, text, phase: readPhase(item) };
           } else if (item.type === 'error') {
             const itemMsg = item.message ?? 'codex item error';
             // Codex reports metadata fallback and a resumed session's model
