@@ -134,8 +134,6 @@ export interface Config {
     privateDiagnostics?: boolean;
     /** Additional allowlisted SDK metadata; requires privateDiagnostics too. Default off. */
     privateDiagnosticsDetails?: boolean;
-    /** Temporary scrubbed SDK error excerpt; requires both diagnostic flags. Default off. */
-    privateDiagnosticsText?: boolean;
     /**
      * How the user-facing reply is selected from a turn's agent messages:
      * - `final` (default): all explicitly labeled final parts, otherwise the last
@@ -761,9 +759,6 @@ function assertSdkEnums(id: string, sdk: Config['sdk']): void {
   check('webSearchMode', sdk.webSearchMode, ['disabled', 'cached', 'live']);
   check('outputSelection', sdk.outputSelection, ['final', 'phase', 'heuristic', 'legacy']);
   validateRecovery(sdk.recovery);
-  if (sdk.privateDiagnosticsText !== undefined && typeof sdk.privateDiagnosticsText !== 'boolean') {
-    throw new Error(`Bot "${id}": sdk.privateDiagnosticsText must be a boolean`);
-  }
   if (sdk.privateDiagnosticsDetails !== undefined && typeof sdk.privateDiagnosticsDetails !== 'boolean') {
     throw new Error(`Bot "${id}": sdk.privateDiagnosticsDetails must be a boolean`);
   }
