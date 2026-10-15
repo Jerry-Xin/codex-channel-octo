@@ -38,11 +38,25 @@ vi.mock('../octo/api.js', () => ({
 
 vi.mock('../agent-bridge.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../agent-bridge.js')>();
+  const queryAgent = vi.fn();
+  // index.ts consumes typed events; replay each string the queryAgent mock
+  // yields as one unclassified message of a single completed attempt. A plain
+  // function (not vi.fn) so clearAllMocks never drops the pass-through.
+  async function* queryAgentEvents(...args: Parameters<typeof original.queryAgentEvents>) {
+    yield { kind: 'attempt_start' as const, attempt: 0, reason: 'initial' as const, continues: null };
+    let seq = 0;
+    for await (const text of (queryAgent as (...a: unknown[]) => AsyncIterable<string>)(...args)) {
+      yield { kind: 'message' as const, attempt: 0, itemId: `item_${seq}`, seq, text, phase: 'unknown' as const };
+      seq++;
+    }
+    yield { kind: 'attempt_end' as const, attempt: 0, terminal: 'completed' as const };
+  }
   return {
     ...original,
     buildSystemPrompt: original.buildSystemPrompt,
     sanitizeForSystemPrompt: original.sanitizeForSystemPrompt,
-    queryAgent: vi.fn(),
+    queryAgent,
+    queryAgentEvents,
   };
 });
 
@@ -236,7 +250,7 @@ describe('E2E smoke tests', () => {
     // queryAgent was called with user message as first arg (user role)
     expect(queryAgent).toHaveBeenCalledTimes(1);
     const userMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(userMsg).toBe('Hi there');
+    expect(userMsg).toBe('\n[Current message — respond to this ONLY]\nHi there');
 
     // Output was sent via sendMessage
     expect(sendMessage).toHaveBeenCalled();
@@ -337,14 +351,14 @@ describe('E2E smoke tests', () => {
     // Turn 1: no prior session → no resume. No prior history yet → nothing injected.
     await simulateMessage(makeDmMsg('first'), cfg, store, router, groupContext, streamRelay);
     expect(seen[0].resume).toBeUndefined();
-    expect(seen[0].userMsg).toBe('first'); // nothing prepended on a truly first turn
+    expect(seen[0].userMsg).toBe('\n[Current message — respond to this ONLY]\nfirst');
     expect(store.getSdkSessionId(USER_UID)).toBe('sdk-session-1');
 
     // Turn 2: resumes the captured id. History lives in the SDK session, so the
     // user message is NOT prefixed with a [Prior conversation history] block.
     await simulateMessage(makeDmMsg('second'), cfg, store, router, groupContext, streamRelay);
     expect(seen[1].resume).toBe('sdk-session-1');
-    expect(seen[1].userMsg).toBe('second');
+    expect(seen[1].userMsg).toBe('\n[Current message — respond to this ONLY]\nsecond');
     expect(seen[1].userMsg).not.toContain('[Prior conversation history');
   });
 
@@ -499,7 +513,7 @@ describe('E2E smoke tests', () => {
     // queryAgent was called with user message in user role
     expect(queryAgent).toHaveBeenCalledTimes(1);
     const userMsg2 = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(userMsg2).toBe('What is this code?');
+    expect(userMsg2).toBe('\n[Current message — respond to this ONLY]\nWhat is this code?');
 
     // Output was sent to group channel
     expect(sendMessage).toHaveBeenCalled();
@@ -615,7 +629,7 @@ describe('E2E smoke tests', () => {
     // carries the prior conversation; first-turn injection only fires when there
     // is no stored session id yet.)
     const secondUserMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
-    expect(secondUserMsg).toBe('Follow up');
+    expect(secondUserMsg).toBe('\n[Current message — respond to this ONLY]\nFollow up');
     expect(secondUserMsg).not.toContain('[Prior conversation history');
 
     // Full history is still recorded in SQLite (durable record / migration / recovery).
@@ -741,7 +755,7 @@ describe('E2E smoke tests', () => {
 
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: '模型服务连接中断（上游返回不完整），已自动重试仍未成功，请稍后重发或换个问法。',
+        content: '模型响应流或本地传输解析失败，自动恢复未成功，请稍后重发。',
       }),
     );
   });
@@ -920,7 +934,7 @@ describe('E2E smoke tests', () => {
     // ] and \n inside from_name are replaced with spaces — the malicious
     // marker is no longer at line start, so even after our outer sanitize
     // pass the LLM sees a single continuous header line.
-    const firstLine = userMsg.split('\n')[0];
+    const firstLine = userMsg.split('\n').find((line: string) => line.includes('Alice'))!;
     expect(firstLine).toContain('Alice');
     expect(firstLine).not.toMatch(/\][\r\n]/); // no ] right before newline
     // The injected [Conversation history] never lands at a real line start.

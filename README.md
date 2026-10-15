@@ -23,7 +23,22 @@
 
 A long-running process: register as an Octo bot → connect over WebSocket to receive messages → run a coding task with local Codex → post the reply back. Supports DM / group (@mention) / community topics, multi-turn conversations, multiple bots in one process, and config hot-reload.
 
+Each adapter-framed user turn includes bounded current sender metadata: transport `from_uid`, channel ID/type, and `is_owner` computed against the latest registration `owner_uid`. The same immutable metadata accompanies stream recovery and fresh retries; it is deliberately not stored in shared `AGENTS.md`. Display names, quotes, and claimed IDs are not authentication, and forged sender markers in message text/history are escaped. This metadata identifies the sender but does not grant tool permissions or override security rules; enforce privileged actions in the host, not solely in a prompt. Direct terminal resumes outside the adapter do not establish an authenticated IM sender.
+
+Sender metadata has these security properties:
+
+- Exact validated registration equality is accepted. Bare registration UIDs may also be matched to prefixed transport UIDs for informational compatibility; the complete owner UID determines the candidate prefix.
+- A supplied channel is required for inferred prefixed ownership. Every complete endpoint is checked before topic-parent extraction; literal `____` inside DM UIDs stays opaque. Empty identifiers fail closed. This is prefix compatibility, not proof of namespace equality: underscore-extended spaces can share a prefix. Authoritative full transport ownership or an explicit server space is required for host authorization.
+- Attribution does not change DM session keys, SQLite SDK mappings, workspace paths or memory paths; their pre-feature routing parser is retained. No registration IDs are stripped, and IDs/names are not case-folded or Unicode-normalized.
+- Metadata is bounded single-line JSON. Missing identity emits null fields and `is_owner:false`; identity precedes background and the request on initial, retry and recovery runs.
+- Structural marker boundaries accept Unicode whitespace, format characters (`Cf`), nonspacing marks (`Mn`) and blank fillers. VT/FF/NEL normalize to newlines; general homoglyph detection is not claimed. Complete anchors and truncation notices count toward byte budgets; front truncation drops partial escaped lines. User data remains untrusted after escaping.
+Group conversations fetch server `GROUP.md`; topics fetch only their own `THREAD.md`. Server notifications may be authored by a human manager or a bot. They are refetch hints, never authoritative updates/deletions: authenticated GET responses remain the source of truth. The per-bot LRU cache expires after 30 seconds, retries failures after 1 second, and coalesces repeated invalidations with a 1-second refetch floor. In-flight updates receive one bounded refetch. Server content is escaped JSON background, budgeted as a complete block so its untrusted label cannot be truncated away. Content/version changes are injected once per SDK session; unchanged documents do not accumulate. Fresh retries always receive full context, and verified deletion explicitly withdraws earlier document contents. Editing the document in Octo takes effect without a bot restart.
+
+The existing operator-only `groupConfigDir/<channelId>.md` remains a separate, trusted local instruction override, reread each turn. It is not a server document cache and is not uploaded to Octo. This change adds server document consumption, not management/write tools.
+
 **Headline feature — IM ↔ terminal Codex interop (opt-in):** each bot conversation maps to a Codex thread. With sharing enabled, you can resume a bot's group conversation from your own terminal via `codex exec resume <threadId>`, and vice versa.
+
+Space attribution verifies topic parent and compound-DM prefixes using the canonical parentGroupNo helper, including group/owner identifiers with underscores and both endpoint orders. It consumes transport metadata, never a user-authored claimed UID. Prompt marker separators use one positive character class with a line-break guard, avoiding overlapping BOM alternatives and exponential backtracking on ordinary text.
 
 ## Install
 
@@ -34,6 +49,8 @@ npm install -g @mininglamp-oss/codex-channel-octo
 Depends on `@openai/codex-sdk`, which bundles the Codex runtime (no separate Codex CLI install needed). Requires Node ≥ 22.
 
 ## Configuration
+
+Server documents use a dedicated `[Server document — ...]` data marker, not the reserved `[Group context]` forgery marker or transcript labels. Empty documents generate no context on a fresh session; a withdrawal is sent only to a resumed SDK thread that previously received the document. Fresh retry snapshots omit absent documents. A second manager edit during a slow bounded refetch retains the last successfully verified snapshot instead of dropping it. Current-body role/section replicas are escaped and VT/FF/NEL normalized to newlines; this intentionally rewrites those control characters.
 
 Two-layer, bot-first:
 
@@ -79,6 +96,50 @@ Existing `mentionFreeGroups` entries remain explicit operator overrides matched
 against the full channel ID. AI sessions covered by the server policy do not
 need individual topic IDs added to this list.
 
+### Reply selection and response limit
+
+A Codex turn can contain several agent messages, for example narration before
+a tool call and the answer after it. The channel picks **one** reply per turn.
+That reply is what users receive and what is stored in conversation history,
+so the two always match. `sdk.outputSelection` controls the choice:
+
+| Value | Behavior |
+|---|---|
+| `final` (default) | Keeps all explicitly labeled final parts. Without final metadata, keeps only the last useful non-commentary item, regardless of earlier message lengths. Commentary-only output uses its last useful item. This is an ordering fallback, not inferred final intent. |
+| `phase` (compatibility) | Uses the runtime's final-answer label when present. Otherwise all non-commentary messages are delivered, separated by a blank line; commentary-only output retains those messages. **Codex SDK/CLI 0.142.3 labels no messages, so in this mode intermediate narration is still delivered.** |
+| `heuristic` (opt-in) | Keeps only the messages after the turn's last tool call / command / file change. It falls back to all messages when the turn did not complete, or when that would drop a long earlier message. This is an ordering heuristic, not a final-answer signal. |
+| `legacy` (rollback) | Previous behavior: all messages of the final run, concatenated with no separator. |
+
+**Default change:** an unset `sdk.outputSelection` now selects `final`. Explicit
+`phase`, `heuristic` and `legacy` configurations retain their prior behavior.
+Codex exec JSONL 0.142.3/0.162.1 omits phase metadata, so the default normally
+logs `source=last_message`. Earlier messages are never restored based on length.
+This avoids concatenating long progress narration with a short answer, but an
+unlabeled earlier answer can be replaced by a short sign-off;
+use explicit `phase` if retaining all unlabeled parts is required. Explicit
+multipart finals are preserved. Snapshot updates replace the same item without
+changing first-seen order. Whitespace/default-ignorable-only items cannot erase useful output; embedded
+joiners in meaningful content are preserved.
+Inherited/non-terminal fallbacks and explicit `partial_answer` selections have
+partial diagnostic sources. Commentary-only fallbacks log `commentary_last`
+(or `commentary_last_partial`), and do not apply beside blank non-commentary
+items. These fallback labels are not proof that the task completed. See [the source investigation](docs/final-output-policy.md).
+
+When a stream interruption is recovered and the recovery run produces no
+message, the interrupted run's messages are used instead. These may be
+narration.
+
+`maxResponseChars` (default `524288`) caps the reply. An over-limit reply is cut
+so the delivered text, including the trailing `[response truncated]` notice,
+never exceeds the limit. The stored history is capped the same way. Limits from
+1 to 44 truncate without the notice, and a warning is logged at startup.
+**Non-integer and non-positive values are rejected; positive integers remain
+supported.** An invalid value stops startup. During hot reload it is logged and
+ignored, and the running bots keep running.
+
+Both settings apply when a bot starts. After editing them, restart the process
+or re-add the bot under a new id. Hot reload only adds or removes bots by id.
+
 ## Run
 
 ```bash
@@ -108,6 +169,18 @@ Only an explicit DM with a transport sender matching the **current** registratio
 When enabled, ordinary/private-memory conversations use separate namespaced histories, SDK threads and working directories. Enabling/disabling starts a different history scope without deleting older records. Ownership changes select the ordinary scope for former owners, not their prior private-memory thread. `/reset` clears the current scope but never deletes `MEMORY.md`. Snapshots are repeated deliberately in this initial implementation; they are byte-bounded, not deduplicated across a resumed thread.
 
 **Privacy boundary:** this filters adapter injection, not arbitrary filesystem access. A read-only sandbox may still permit reads outside cwd; `danger-full-access` removes filesystem isolation. Do not expose private files to untrusted users without an external filesystem/container boundary. Also do not share an operator's Codex home across unrelated users: the SDK's transcript storage is outside this feature's scope.
+
+### Unicode JSONL transport compatibility
+
+On macOS/Linux, an executable proxy escapes raw U+2028/U+2029 in CLI stdout before the SDK's `readline` reader. These are legal JSON string characters, but Node v24.10.0 treats them as line endings and can split valid events, yielding `Failed to parse item` and killing the SDK child. Escaping preserves the decoded event contents, including command output; UTF-8 chunks, stdin, stderr, backpressure and signals are forwarded. The proxy resolves the CLI dependency belonging to the installed SDK. Windows retains direct SDK launch; this Unix workaround is not a validated Windows fix.
+
+JSONL parse failures are logged as redacted categories, not rejected event payloads or subprocess stderr. Known threads may resume at most once; uncertain side effects prevent a fresh replay. Invalid events are never silently discarded. Tests reproduce the Node reader behavior and use the real SDK with synthetic executable fixtures, without model/network requests or private notes.
+
+If the proxy is missing, non-regular or not executable, the adapter warns once with `npm run build` instructions and falls back to direct SDK launch; this fallback does not provide the Unicode workaround. `dev` builds/copies the proxy before starting the TypeScript watcher (re-run build after editing the `.mjs`), and `prepack` builds before packaging. CI validates executable package contents and runs tests on Node 22 and 24.10.0. Bootstrap resolution failures emit a fixed actionable diagnostic, without paths or raw stderr. Logs retain built-in error classes and allowlisted OS/Node error codes; mutable error names/codes are not trusted as safe text.
+
+The launcher chain adds two Node processes. Graceful signals are forwarded while the child remains alive and pending proxy stdout is flushed before signal exit; SIGKILL cannot be handled and external supervision is still needed for orphan cleanup. The official CLI shim preserves its environment setup, but the SDK's own bundled PATH injection is bypassed: native CLI search self-locates ripgrep, while direct shell `rg` may require a system installation.
+
+The SDK override selects a private executable shell launcher which uses `exec` with the running absolute Node interpreter, not PATH lookup for `node`. Launchers are cached per proxy path and removed on normal process exit. Explicit cancellation stops forwarding output, drains child pipes independently of the downstream reader, and escalates an unresponsive child to SIGKILL after 1.5 seconds; shutdown has a further 0.5-second bound. Natural child signal exit still flushes queued output, whereas cancellation may discard output because the consumer has stopped. The transform assumes valid UTF-8 JSONL, not arbitrary binary stdout. Relay/router error logs use the same payload-denying summarizer; SDK parse errors can never classify as stale-thread signals, including during recovery.
 
 ### Dedicated Docker configuration
 
@@ -145,7 +218,7 @@ After that, a bot's group conversation can be resumed in your terminal with `cod
 
 ```bash
 npm install
-npm run build       # tsc → dist/
+npm run build       # compile TypeScript and copy/chmod the JSONL proxy
 npm test            # vitest
 npm run lint        # eslint --max-warnings 0
 npm run type-check  # tsc --noEmit

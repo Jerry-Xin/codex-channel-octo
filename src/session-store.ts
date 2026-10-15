@@ -75,6 +75,12 @@ CREATE TABLE IF NOT EXISTS sdk_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
+CREATE TABLE IF NOT EXISTS conversation_document_state (
+  session_id TEXT PRIMARY KEY,
+  sdk_session_id TEXT NOT NULL,
+  signature TEXT,
+  FOREIGN KEY(session_id) REFERENCES sdk_sessions(session_id) ON DELETE CASCADE
+);
 `;
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -294,7 +300,12 @@ export class SessionStore {
    * later turn can resume it. Upserts (latest wins).
    */
   setSdkSessionId(sessionId: string, sdkSessionId: string): void {
+    const changed = this.getSdkSessionId(sessionId) !== sdkSessionId;
     this.upsertSdkSession.run(sessionId, sdkSessionId, Date.now());
+    if (changed) {
+      this.adapter.prepare('INSERT INTO conversation_document_state (session_id, sdk_session_id, signature) VALUES (?, ?, NULL) ON CONFLICT(session_id) DO UPDATE SET sdk_session_id = excluded.sdk_session_id, signature = NULL')
+        .run(sessionId, sdkSessionId);
+    }
   }
 
   /** Return the stored SDK session UUID for a sessionKey, or undefined. */
@@ -308,6 +319,18 @@ export class SessionStore {
   /** Forget the SDK session mapping (e.g. on /reset or a resume failure). */
   clearSdkSessionId(sessionId: string): void {
     this.deleteSdkSession.run(sessionId);
+  }
+
+  getConversationDocumentSignature(sessionId: string, threadId: string): string | null | undefined {
+    if (this.getSdkSessionId(sessionId) !== threadId) return null;
+    const row = this.adapter.prepare('SELECT signature FROM conversation_document_state WHERE session_id = ? AND sdk_session_id = ?')
+      .get(sessionId, threadId) as { signature: string | null } | undefined;
+    return row?.signature;
+  }
+
+  setConversationDocumentSignature(sessionId: string, threadId: string, signature: string): void {
+    this.adapter.prepare('INSERT INTO conversation_document_state (session_id, sdk_session_id, signature) SELECT session_id, sdk_session_id, ? FROM sdk_sessions WHERE session_id = ? AND sdk_session_id = ? ON CONFLICT(session_id) DO UPDATE SET sdk_session_id = excluded.sdk_session_id, signature = excluded.signature')
+      .run(signature, sessionId, threadId);
   }
 
   close(): void {

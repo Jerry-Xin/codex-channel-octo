@@ -477,3 +477,71 @@ describe('Two-phase startup: register() then connect()', () => {
     expect(() => gw.startServices()).toThrow(/before register/i);
   });
 });
+
+describe('Issue #18: durable connection recovery', () => {
+  let gw: OctoGateway;
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'cc-octo-recovery-'));
+    vi.clearAllMocks(); setupMocks(); vi.useFakeTimers();
+    gw = new OctoGateway(makeConfig(), { handleSignals: false });
+    await gw.start();
+  });
+  afterEach(async () => { await gw.stop(); vi.useRealTimers(); rmSync(tmpDir, { recursive: true, force: true }); });
+  const latest = () => vi.mocked(WKSocket).mock.calls.at(-1)![0];
+
+  it('retries failed registration even when REST heartbeats succeed', async () => {
+    vi.mocked(registerBot).mockRejectedValueOnce(new Error('temporary outage'));
+    latest().onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(registerBot).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sendHeartbeat).toHaveBeenCalled();
+    expect(registerBot).toHaveBeenCalledTimes(3);
+    expect(WKSocket).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(WKSocket).mock.results.at(-1)!.value.connect).toHaveBeenCalledOnce();
+  });
+  it('queues one refresh at the cooldown boundary instead of losing repeated requests', async () => {
+    latest().onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(1);
+    const second = latest();
+    for (let i = 0; i < 5; i++) second.onError!(new Error('Connect failed: rapid disconnect detected'));
+    await vi.advanceTimersByTimeAsync(59_998);
+    expect(registerBot).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(registerBot).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(registerBot).toHaveBeenCalledTimes(3);
+  });
+  it('keeps retrying across consecutive registration failures', async () => {
+    vi.mocked(registerBot).mockRejectedValueOnce(new Error('outage')).mockRejectedValueOnce(new Error('still unavailable'));
+    latest().onError!(new Error('Connect failed: reasonCode=2'));
+    await vi.advanceTimersByTimeAsync(120_001);
+    expect(registerBot).toHaveBeenCalledTimes(4);
+    expect(WKSocket).toHaveBeenCalledTimes(2);
+  });
+  it('does not resurrect a socket or heartbeat when an in-flight refresh finishes after stop', async () => {
+    const reg = await vi.mocked(registerBot).mock.results[0].value;
+    let complete!: (value: typeof reg) => void;
+    vi.mocked(registerBot).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    latest().onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(1);
+    await gw.stop();
+    complete(reg); await vi.advanceTimersByTimeAsync(120_000);
+    expect(WKSocket).toHaveBeenCalledTimes(1);
+    expect(sendHeartbeat).not.toHaveBeenCalled();
+  });
+  it('cancels scheduled recovery and ignores callbacks from retired sockets', async () => {
+    const retired = latest(); retired.onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(1);
+    retired.onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(registerBot).toHaveBeenCalledTimes(2);
+    latest().onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(1);
+    const count = vi.mocked(registerBot).mock.calls.length;
+    latest().onError!(new Error('Connect failed: reasonCode=2'));
+    await vi.advanceTimersByTimeAsync(1);
+    await gw.stop(); await vi.advanceTimersByTimeAsync(120_000);
+    expect(registerBot).toHaveBeenCalledTimes(count);
+  });
+});

@@ -187,7 +187,11 @@ export const MAX_USER_LLM_BYTES = 98_304; // 96 KB
 /**
  * Assemble a user-role message from injected `context` (first-turn history +
  * group-context delta, or a stale-resume fallback history block) and the current
- * message `body`, byte-capped at `maxBytes`.
+ * message `body`, byte-capped at `maxBytes`. Both fragments must already be
+ * escaped by the caller; assembly does not sanitize their internal structure.
+ * Budgets smaller than a complete request anchor return empty, never a partial
+ * privileged marker. The context truncation notice ends with a space so its
+ * first surviving fragment cannot become a new line-leading structural marker.
  *
  * The body is the PRIORITY — it is the actual new request and must always reach
  * the model whole. So we reserve the body's full byte size first, then give the
@@ -195,6 +199,8 @@ export const MAX_USER_LLM_BYTES = 98_304; // 96 KB
  * oldest) — never the end. If the body alone meets/exceeds the budget, context is
  * dropped entirely and the body is byte-capped as a last resort. This prevents a
  * large prior-history block from evicting the current message (PR #120 review).
+ * Context must already be escaped by the caller. Front truncation discards its
+ * first partial line so a slice cannot strip a marker's protective backslash.
  */
 /**
  * Byte-cap the body alone as a last resort, appending a truncation notice when it
@@ -203,14 +209,14 @@ export const MAX_USER_LLM_BYTES = 98_304; // 96 KB
  * the current message still reaches the model.
  */
 function capBodyToBudget(body: string, maxBytes: number): string {
-  const { truncated, wasTruncated } = truncateUtf8ByBytes(body, maxBytes);
-  return wasTruncated ? truncated + '\n[… user input truncated to cap]' : body;
+  if (Buffer.byteLength(body, 'utf-8') <= maxBytes) return body;
+  const notice = '\n[… user input truncated to cap]';
+  const noticeBytes = Buffer.byteLength(notice, 'utf-8');
+  if (maxBytes < noticeBytes) return truncateUtf8ByBytes(body, maxBytes).truncated;
+  return truncateUtf8ByBytes(body, maxBytes - noticeBytes).truncated + notice;
 }
 
-export function assembleUserMessage(context: string, body: string, maxBytes: number): string {
-  if (!context) {
-    return capBodyToBudget(body, maxBytes);
-  }
+export function assembleUserMessage(context: string, body: string, maxBytes: number, atomicContext = ''): string {
   // Positive anchor (#132): the background context above is READ-ONLY; this line
   // demarcates the actual new request so the model responds to it ONLY and does
   // not reply line-by-line to the [Recent group messages] / [Prior conversation
@@ -218,14 +224,18 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   // The literal is the shared CURRENT_MESSAGE_ANCHOR so the emitter, the system
   // prompt, and the escape regex can never drift apart (#133 review).
   const anchor = `\n${CURRENT_MESSAGE_ANCHOR}\n`;
-  const anchored = anchor + body;
-  const bodyBytes = Buffer.byteLength(anchored, 'utf-8');
+  const anchorBytes = Buffer.byteLength(anchor, 'utf-8');
+  if (maxBytes < anchorBytes) return '';
+  const current = anchor + body;
+  const bodyBytes = Buffer.byteLength(current, 'utf-8');
   if (bodyBytes >= maxBytes) {
     // Pathological: the body alone fills/overflows the budget. Drop context
     // entirely and cap the body — the current message still gets through.
-    return capBodyToBudget(body, maxBytes);
+    return anchor + capBodyToBudget(body, maxBytes - anchorBytes);
   }
-  const contextBudget = maxBytes - bodyBytes;
+  const protectedContext = Buffer.byteLength(atomicContext, 'utf-8') <= maxBytes - bodyBytes ? atomicContext : '';
+  const anchored = protectedContext + current;
+  const contextBudget = maxBytes - bodyBytes - Buffer.byteLength(protectedContext, 'utf-8');
   const ctxBytes = Buffer.byteLength(context, 'utf-8');
   if (ctxBytes <= contextBudget) {
     return context + anchored;
@@ -235,7 +245,7 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   // the result would exceed maxBytes by the marker length (PR #120 review). Slice
   // the buffer to the remaining bytes; a leading partial UTF-8 sequence decodes to
   // a replacement char which we strip so we never emit U+FFFD.
-  const marker = '[… earlier context truncated]\n';
+  const marker = '[… earlier context truncated] ';
   const markerBytes = Buffer.byteLength(marker, 'utf-8');
   const tailBudget = contextBudget - markerBytes;
   if (tailBudget <= 0) {
@@ -245,7 +255,9 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   const ctxBuf = Buffer.from(context, 'utf-8');
   const tail = ctxBuf.subarray(ctxBuf.length - tailBudget);
   const decoded = new TextDecoder('utf-8').decode(tail).replace(/^�+/, '');
-  return marker + decoded + anchored;
+  const firstLineEnd = decoded.indexOf('\n');
+  const completeLines = firstLineEnd < 0 ? '' : decoded.slice(firstLineEnd + 1);
+  return marker + completeLines + anchored;
 }
 
 /** Exported for tests. */

@@ -16,6 +16,8 @@ import {
   sendMessage,
 } from "./octo/api.js";
 import { resolveMentions } from "./mention-utils.js";
+import { TRUNCATION_SUFFIX, DEFAULT_MAX_RESPONSE_CHARS } from "./output-selection.js";
+import { summarizeAgentError } from "./agent-errors.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -24,12 +26,6 @@ const TYPING_INTERVAL_MS = 5_000;
 
 /** Maximum characters per message segment. */
 const MAX_SEGMENT_CHARS = 3_500;
-
-/** Default maximum accumulated response length before truncation (Q32). */
-const DEFAULT_MAX_RESPONSE_CHARS = 524_288; // 512 KB
-
-/** Truncation suffix appended when response exceeds limit. */
-const TRUNCATION_SUFFIX = '\n\n[response truncated]';
 
 // ─── Message Splitting ─────────────────────────────────────────────────────
 
@@ -202,7 +198,7 @@ export class StreamRelay {
         }
       } catch (err) {
         streamError = err;
-        console.error(`[stream-relay] agent stream threw after ${accumulated.length} char(s); flushing partial output: ${String(err)}`);
+        console.error(`[stream-relay] agent stream threw after ${accumulated.length} char(s); flushing partial output: ${summarizeAgentError(err)}`);
       }
       if (truncated) {
         console.warn(`[stream-relay] Response truncated at ${maxResponseChars} chars`);
@@ -269,7 +265,7 @@ export class StreamRelay {
               ...(useMentionAll ? { mentionAll: true } : {}),
             });
           } catch (err) {
-            console.error(`[stream-relay] sendMessage failed for segment (${segment.length} chars), continuing: ${String(err)}`);
+            console.error(`[stream-relay] sendMessage failed for segment (${segment.length} chars), continuing: ${summarizeAgentError(err)}`);
             // Continue sending remaining segments — don't let one failure drop the rest
           }
           segStart = segEnd;

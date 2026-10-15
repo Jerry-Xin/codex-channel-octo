@@ -326,6 +326,38 @@ export async function getMentionPreference(params: {
     && (data?.group_allow_no_mention === undefined || enabled(data.group_allow_no_mention));
 }
 
+export interface ConversationMdResponse {
+  content: string;
+  version: number;
+}
+
+export async function getGroupMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+}): Promise<ConversationMdResponse> {
+  return getConversationMd(params.apiUrl, params.botToken,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/md`);
+}
+
+export async function getThreadMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<ConversationMdResponse> {
+  return getConversationMd(params.apiUrl, params.botToken,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/md`);
+}
+
+async function getConversationMd(apiUrl: string, botToken: string, path: string): Promise<ConversationMdResponse> {
+  const data = await getJson<ConversationMdResponse>(apiUrl, botToken, path, AbortSignal.timeout(5000));
+  if (!data || typeof data.content !== 'string' || !Number.isInteger(data.version) || data.version < 0) {
+    throw new Error('Invalid conversation markdown response');
+  }
+  return data;
+}
+
 // ─── Group Members ──────────────────────────────────────────────────────────
 
 export interface GroupMember {

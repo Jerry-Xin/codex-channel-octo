@@ -15,7 +15,18 @@ import { SessionStore } from './session-store.js';
 import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
-import { queryAgent, isStreamInterruptError } from './agent-bridge.js';
+import { queryAgentEvents, isStreamInterruptError } from './agent-bridge.js';
+import type { QueryAgentOptions } from './agent-bridge.js';
+import {
+  OutputCollector,
+  DEFAULT_OUTPUT_SELECTION_MODE,
+  DEFAULT_MAX_RESPONSE_CHARS,
+  describeSelection,
+  isSmallResponseLimit,
+  type OutputSelectionMode,
+  type SelectedOutput,
+} from './output-selection.js';
+import { summarizeAgentError } from './agent-errors.js';
 import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody } from './prompt-safety.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { cleanupExpiredCwds, resolveSessionCwd } from './cwd-resolver.js';
@@ -29,6 +40,8 @@ import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
 import { canLoadPrivateMemory, loadPrivateMemory, privateMemorySessionKey } from './private-memory.js';
+import { buildSenderContext } from './sender-context.js';
+import { isConversationMdEvent } from './conversation-md.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
@@ -59,7 +72,7 @@ function configPathForWatch(): string {
 async function main(): Promise<void> {
   // --- Q8: Global unhandled rejection handler ---
   process.on('unhandledRejection', (reason) => {
-    console.error('[codex-channel-octo] Unhandled rejection:', reason instanceof Error ? reason.message : reason);
+    console.error('[codex-channel-octo] Unhandled rejection:', summarizeAgentError(reason));
   });
 
   // --- Config ---
@@ -157,6 +170,11 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     `sdk.approvalPolicy=${config.sdk.approvalPolicy ?? 'never'}, ` +
     `rateLimit=${config.rateLimit.maxPerMinute} req/min`,
   );
+  if (isSmallResponseLimit(config.maxResponseChars)) {
+    console.warn(
+      `[codex-channel-octo] ${label}maxResponseChars=${config.maxResponseChars} is too small for the truncation notice; truncating without it`,
+    );
+  }
 
   // --- Q3: per-session cwd cleanup (7d TTL) ---
   cleanupExpiredCwds(cwdBase);
@@ -233,7 +251,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     }
 
     // --- Session router ---
-    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
+    const router = new SessionRouter(config, gateway.botId, () => gateway.ownerUid, store);
 
     // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
     const activeHandlers = new Set<Promise<void>>();
@@ -246,10 +264,11 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
       if (gateway.draining) return;
       // Match the gateway's self-echo guard: server preference notifications
       // authored as this bot must reach the router to invalidate its cache.
-      if (msg.from_uid === gateway.botId && msg.payload.event?.type !== 'mention_pref_updated') return;
+      if (msg.from_uid === gateway.botId && msg.payload.event?.type !== 'mention_pref_updated'
+        && !isConversationMdEvent(msg.payload.event?.type)) return;
       const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, () => gateway.ownerUid)
         .catch((err) => {
-          console.error(`[codex-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
+          console.error(`[codex-channel-octo] ${label}Unhandled message handler error:`, summarizeAgentError(err));
         })
         .finally(() => {
           activeHandlers.delete(p);
@@ -568,7 +587,7 @@ export async function handleMessage(
       // The final user message is assembled AFTER history is built (below), so
       // the one-time history block + group-context delta can be prepended and
       // the whole payload capped together. See the assembly near queryAgent.
-      const userBody = quotePrefix + escapeSectionMarkers(bodyText);
+      const userBody = quotePrefix + sanitizePromptBody(bodyText);
       // G4: Backfill history from API when local cache is empty for groups.
       // Only triggered on first interaction with a group (cold start) to avoid
       // duplicate API calls; checked via a sentinel marker stored in-memory.
@@ -656,11 +675,13 @@ export async function handleMessage(
       // only when there is no history. Later turns carry only the delta. The
       // cursor was already advanced above, so dropping the delta here does not
       // strand messages — history covers them and they must not be re-shown.
+      const serverMd = isGroup ? await router.prepareConversationMd(channelId, channelType, resume, sessionKey) : undefined;
       const injectedContext = firstTurnHistory ? firstTurnHistory : groupContextBlock;
       const userContentForLLM = assembleUserMessage(
         injectedContext,
         userBody,
         MAX_USER_LLM_BYTES,
+        serverMd?.context,
       );
 
       // Pre-assemble the stale-resume RETRY prompt here, where `historyBlock` and
@@ -676,7 +697,7 @@ export async function handleMessage(
       // Only built when resuming — it's the sole consumer (sessionOpts below), so a
       // first turn (no resume) would otherwise assemble it just to discard it.
       const fallbackRetryPrompt = resume
-        ? assembleUserMessage(historyBlock, userBody, MAX_USER_LLM_BYTES)
+        ? assembleUserMessage(historyBlock, userBody, MAX_USER_LLM_BYTES, serverMd?.retryContext)
         : undefined;
 
       // --- Query agent with structural role separation (Q3 fix) ---
@@ -721,9 +742,16 @@ export async function handleMessage(
       // queryAgent recovers by calling onResumeFailed (clear the bad id) and
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
-      let sessionOpts: Parameters<typeof queryAgent>[4] = {
+      let sessionOpts: QueryAgentOptions | undefined = {
+        senderContext: buildSenderContext(msg, router.getOwnerUid()),
         ...(resume ? { resume } : {}),
-        onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
+        onSessionId: (id: string, prompt: string) => {
+          store.setSdkSessionId(sessionKey, id);
+          if (serverMd && ((serverMd.context && prompt.includes(serverMd.context))
+            || (serverMd.retryContext && prompt.includes(serverMd.retryContext)))) {
+            serverMd.commit(id);
+          }
+        },
         ...(resume
           ? {
               onResumeFailed: () => store.clearSdkSessionId(sessionKey),
@@ -745,15 +773,20 @@ export async function handleMessage(
       if (eligibleForMemory) {
         sessionOpts = { ...(sessionOpts ?? {}), privateMemoryContext: loadPrivateMemory(config, msg, ownerUid) };
       }
-      const rawChunks = queryAgent(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);
+      const agentEvents = queryAgentEvents(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);
 
-      // Tee the generator: collect full text while streaming to Octo
-      const collected: string[] = [];
-      async function* teeChunks(): AsyncIterable<string> {
-        for await (const chunk of rawChunks) {
-          collected.push(chunk);
-          yield chunk;
-        }
+      // Select ONE reply for both delivery and history. The relay drains the
+      // agent run through this iterable (so the typing heartbeat covers it),
+      // then receives exactly one chunk: the selected, already-capped text. If
+      // the agent throws, nothing is yielded, delivered or stored.
+      const outputMode = (config.sdk.outputSelection ?? DEFAULT_OUTPUT_SELECTION_MODE) as OutputSelectionMode;
+      let selected: SelectedOutput | undefined;
+      async function* selectedChunks(): AsyncIterable<string> {
+        const collector = new OutputCollector();
+        for await (const ev of agentEvents) collector.push(ev);
+        selected = collector.select({ mode: outputMode, maxChars: config.maxResponseChars ?? DEFAULT_MAX_RESPONSE_CHARS });
+        console.log(describeSelection(selected, outputMode, collector.attemptCount));
+        if (selected.text) yield selected.text;
       }
 
       // --- Stream output to Octo ---
@@ -767,7 +800,7 @@ export async function handleMessage(
       const isValidMentionUid = isGroup
         ? (uid: string): boolean => groupContext.isMember(channelId, uid)
         : undefined;
-      await streamRelay.deliver(channelId, channelType, teeChunks(), config.apiUrl, config.botToken, config.maxResponseChars, outboundNameToUid, isValidMentionUid);
+      await streamRelay.deliver(channelId, channelType, selectedChunks(), config.apiUrl, config.botToken, config.maxResponseChars, outboundNameToUid, isValidMentionUid);
 
       // G8: Send read receipt after processing (fire-and-forget)
       if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
@@ -781,7 +814,8 @@ export async function handleMessage(
       }
 
       // --- Store assistant response in history ---
-      const fullResponse = collected.join('');
+      // Same bytes the relay received (mention rendering is delivery-only).
+      const fullResponse = selected?.text ?? '';
       if (fullResponse) {
         store.appendAssistant(sessionKey, fullResponse, msg.message_seq, botId);
         // G10: mark this message_seq as the last one we replied to. Next turn's
@@ -804,12 +838,12 @@ export async function handleMessage(
       }
 
     } catch (err) {
-      console.error(`[codex-channel-octo] Error processing message (session=${result.sessionKey}):`, String(err));
+      console.error(`[codex-channel-octo] Error processing message (session=${result.sessionKey}):`, summarizeAgentError(err));
       // Best-effort error reply. A stream interrupt that even one-shot resume
       // recovery couldn't save gets an informative message (upstream returned
       // an incomplete stream); everything else keeps the generic wording.
       const content = isStreamInterruptError(err)
-        ? '模型服务连接中断（上游返回不完整），已自动重试仍未成功，请稍后重发或换个问法。'
+        ? '模型响应流或本地传输解析失败，自动恢复未成功，请稍后重发。'
         : 'An error occurred while processing your message. Please try again.';
       try {
         await sendMessage({

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-turn transport sender metadata matched to the registration UID or its
+  single prefix in the transport space (including UUID/operator-named spaces);
+  identity is kept out of shared AGENTS.md. Unicode whitespace/invisibles are
+  handled consistently around section and role markers. Every request has an
+  anchor; absent sender metadata explicitly fails closed on resumed threads.
+- Fetch server GROUP.md/THREAD.md as separately labelled, bounded conversation
+  data; manager edits trigger authenticated refetch without trusting event payloads.
+
 - Explicit `sdk.sandboxMode: "danger-full-access"` support for externally
   isolated deployments, with a dedicated Docker configuration template.
   General defaults remain read-only; `/config` reports unrestricted Codex
@@ -21,9 +29,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if they contain, equal, or sit inside a trusted/sensitive directory — the
   session cwd, the config/SOUL tree, `groupConfigDir`, the memory dir, or
   `codexHome` — so a writable root can never overlap the agent's trust anchors.
+- **`sdk.outputSelection`** (`final` default; `phase`, `heuristic` and `legacy`
+  compatibility modes) selects one reply shared by delivery and stored history.
+  Explicit final parts are preserved. Without labels, the last useful message
+  is selected regardless of earlier message lengths, preventing long progress
+  narration from being restored before a short answer. Unlabeled multipart
+  answers may lose earlier parts; explicit compatibility modes remain available.
+  Commentary and partial fallbacks have distinct diagnostics. Applied at bot
+  start (restart or re-add the bot after editing).
+
+### Changed
+
+- Multiple agent messages in one reply are now separated by a blank line
+  (`legacy` keeps the old concatenation).
+- `maxResponseChars` now bounds the whole delivered reply, including the
+  `[response truncated]` notice. Limits from 1 to 44 truncate without the
+  notice. Stored history is capped the same way instead of keeping the
+  untruncated text. Non-integer and non-positive values are rejected at
+  startup (and ignored with a log on hot reload); positive integers remain
+  supported.
 
 ### Fixed
 
+- Keep Octo recovery alive after failed token refreshes and cooldown-suppressed
+  requests, independently of successful REST heartbeats. Coalesce retry timers,
+  ignore retired-socket callbacks and cancel/abort recovery on shutdown.
+- Bound WebSocket/CONNACK handshakes and retain backoff reconnect after rapid
+  disconnect hints, so transient failures recover without restarting the gateway.
+- Preserve pre-feature DM session keys, persisted SDK mappings, workspace and
+  memory paths; sender attribution no longer changes DM routing parsers.
+- Escape Unicode format/nonspacing marks and blank fillers at structural marker
+  boundaries, including supplementary-plane characters, without ambiguous
+  separator alternatives. Match complete unescaped request anchors only.
+- Validate all endpoints before topic extraction and reject empty endpoint IDs.
+
+- Treat compound-DM endpoint UIDs as opaque, applying topic parent extraction
+  only to topic channels so literal `____` cannot hide a cross-space endpoint.
+
+- Keep section suffixes within one line and outside nested opening brackets;
+  restore punctuation-delimited role labels and verify compound DM/topic channel
+  prefixes against the sender-derived candidate rather than guessing UID boundaries.
+- Remove overlapping separator alternatives that let BOM-prefixed ordinary
+  text cause exponential prompt-escaping backtracking; derive topic ownership
+  from the parent channel and sender prefix boundaries from the complete owner UID.
+- Preserve JSONL events containing Unicode LS/PS on Unix, safely fall back when
+  the proxy is unavailable, and redact event payloads while retaining error classes/codes.
+
+- Drop the first partial line of front-truncated escaped history, preventing a
+  sliced-off escape from introducing a second privileged current-message anchor.
+- Persist server-document injection signatures alongside SDK session mappings,
+  retaining deletion withdrawals across restarts and cache eviction. Clear state
+  on thread replacement/reset and conservatively withdraw for legacy mappings
+  with unknown injection history; no document bodies are stored in this ledger.
+- Retain a verified server snapshot when a second invalidated fetch fails,
+  retrying after the short failure TTL. Record only context in the actual SDK
+  run prompt, not context planned for another recovery attempt.
 - Keep reading Codex replies after the known model-metadata fallback notice,
   logging it as a warning while continuing to surface other error items.
 - Recover stale threads reported as `no rollout found` by clearing the invalid

@@ -788,6 +788,13 @@ describe('#157: unregisterKnownBot', () => {
 // ─── G18: owner_uid storage ────────────────────────────────────────────────────────────
 
 describe('G18: owner_uid storage', () => {
+  it('reads the latest owner after registration refresh instead of a stale snapshot', () => {
+    let owner = 'first-owner';
+    const router = new SessionRouter(makeConfig(), ROBOT_ID, () => owner);
+    expect(router.getOwnerUid()).toBe(owner);
+    owner = 'next-owner';
+    expect(router.getOwnerUid()).toBe(owner);
+  });
   it('SessionRouter accepts and stores ownerUid (default empty)', () => {
     const r1 = new SessionRouter(makeConfig(), ROBOT_ID);
     expect(r1).toBeDefined(); // construct without ownerUid arg
