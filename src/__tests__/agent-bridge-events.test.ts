@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { TurnFailure } from '../agent-failure.js';
 /**
  * agent-bridge typed-event tests (queryAgentEvents) — mocked @openai/codex-sdk.
@@ -33,9 +34,17 @@ vi.mock('@openai/codex-sdk', () => ({
   },
 }));
 
+vi.mock('../execution-scope.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../execution-scope.js')>();
+  return {...original, ExecutionScope: class extends original.ExecutionScope {
+    constructor() { super(fileURLToPath(new URL('./fixtures/owned-cli.mjs', import.meta.url))); }
+  }};
+});
+
 import { queryAgent, queryAgentEvents } from '../agent-bridge.js';
 import type { AgentOutputEvent, QueryAgentOptions } from '../agent-bridge.js';
 import type { Config } from '../config.js';
+import type { ManagedExecution } from '../execution-scope.js';
 
 function cfg(): Config {
   return {
@@ -75,6 +84,17 @@ const staleErr = 'thread not found';
 beforeEach(() => {
   runIdx = 0;
   scriptedRuns = [];
+});
+
+it('retains positive non-execution proof for an earlier spawn retry scope',async()=>{
+  scriptedRuns=[async function*(){throw Object.assign(new Error('synthetic'),{code:'EAGAIN',syscall:'spawn proxy'});},async function*(){yield started('thread');yield {type:'turn.failed',error:{message:'synthetic failure'}};}];
+  const config=cfg();config.sdk.recovery={enabled:true,baseDelayMs:1,maxDelayMs:1};const scopes:ManagedExecution[]=[];
+  try{
+    await expect((async()=>{for await(const event of queryAgentEvents('current request',config,undefined,undefined,{onManagedExecution:scope=>{scopes.push(scope);}}))void event;})()).rejects.toMatchObject({report:{first:{stage:'spawn'},attempts:2}});
+    expect(scopes).toHaveLength(2);expect(runIdx).toBe(2);
+    expect(await scopes[0].waitForStopped(0)).toBe(true);
+    expect(await scopes[1].waitForStopped(0)).toBe(false); // Mocked SDK launches no gateway-owned process.
+  }finally{scopes.forEach(scope=>scope.dispose());}
 });
 
 describe('work events', () => {
@@ -250,6 +270,8 @@ describe('T25: one canonical options contract', () => {
       assertPublishable?: () => void;
       onExecutionRisk?: (risk: import('../agent-failure.js').ExecutionRisk) => void;
       privateMemoryContext?: import('../prompt-safety.js').SafeText;
+      onManagedExecution?: (execution: import('../execution-scope.js').ManagedExecution) => void;
+      interruptedTurn?: import('../turn-context.js').InterruptedTurn;
     }>();
   });
 

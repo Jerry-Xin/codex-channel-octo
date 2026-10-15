@@ -144,7 +144,7 @@ IM 输入是**不可信**的,权限边界是 **sandbox**,不是 prompt:
 
 ### 安全恢复与执行隔离
 
-执行状态不确定时会话暂停，重启和 reset 不会解除；SDK 尚未启动即取消则保持 clean。
+中断处理函数退出且网关确认受管理执行已停止后，可以发送新请求，保留失败上下文但不自动重放旧任务；清理期间新请求排队。缺少停止证据、历史或崩溃隔离仍保留维护保护，重启和 reset 不会解除；SDK 尚未启动即取消则保持 clean。详见[会话连续性](docs/session-continuity.md)。
 自动重试默认关闭，只覆盖能证明尚未执行的暂时性故障。核对外部结果后，来信 UID
 **与注册 owner_uid 精确相同**的主人可发送：
 
@@ -219,6 +219,10 @@ npm test            # vitest
 npm run lint        # eslint --max-warnings 0
 npm run type-check  # tsc --noEmit
 ```
+
+### 本机运维诊断（默认关闭）
+
+设置 `sdk.privateDiagnostics: true` 可保存与任务编号关联的本机失败元数据。SDK 错误文本只保留指纹，不写入原文；公开回复不变。日志仅当前用户可读，最多保留三个文件，每个不超过 1 MiB。详见[隐私边界、保留策略与解读](docs/private-diagnostics.md)。
 
 ## License
 

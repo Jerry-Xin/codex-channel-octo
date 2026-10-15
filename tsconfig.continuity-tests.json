@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": [
+    "src/__tests__/agent-bridge-events.test.ts",
+    "src/__tests__/private-diagnostics.test.ts",
+    "src/__tests__/execution-bridge.test.ts",
+    "src/__tests__/execution-scope.test.ts",
+    "src/__tests__/execution-adversarial.test.ts",
+    "src/__tests__/inbound-wiring.test.ts",
+    "src/__tests__/prompt-safety.test.ts",
+    "src/__tests__/session-continuity.test.ts"
+  ],
+  "exclude": ["node_modules", "dist", "coverage"]
+}

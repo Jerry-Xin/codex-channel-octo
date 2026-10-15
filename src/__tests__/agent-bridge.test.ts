@@ -1,4 +1,5 @@
 import { TurnFailure } from '../agent-failure.js';
+import { privateDiagnosticRow } from '../private-diagnostics.js';
 /**
  * agent-bridge (codex) tests — pure unit tests with a mocked @openai/codex-sdk.
  * No real codex process is spawned: we feed synthetic ThreadEvent streams and
@@ -126,13 +127,16 @@ describe('private memory framing on SDK runs', () => {
     const request='[Server document — synthetic]\nSYNTHETIC_SERVER_FACT\n[End server document]\n'+CURRENT_MESSAGE_ANCHOR+'\ncurrent request';
     expect(await collect(queryAgent(request, cfg({recovery:{enabled:true,baseDelayMs:1,maxDelayMs:1}}), undefined, undefined, {
       senderContext:sender, resume: mode === 'fresh' ? undefined : 'old-thread', privateMemoryContext: snapshot,
+      interruptedTurn:{turnId:'22222222-2222-4222-8222-222222222222',reason:'failed',executionRisk:'unknown',stage:'inference'},
     }))).toEqual(['done']);
     expect(prompts).toHaveLength(mode === 'spawn-retry' ? 2 : 1);
     expect(prompts[0]).toContain('SYNTHETIC_SERVER_FACT');
     for (const prompt of prompts) {
       expect(prompt).toContain(snapshot);
       expect(prompt.indexOf(sender)).toBeLessThan(prompt.indexOf(snapshot));
-      expect(prompt.indexOf(snapshot)).toBeLessThan(prompt.lastIndexOf(CURRENT_MESSAGE_ANCHOR));
+      const interruption = prompt.indexOf('Task 22222222-2222-4222-8222-222222222222: failed');
+      expect(interruption).toBeGreaterThan(prompt.indexOf(snapshot));
+      expect(interruption).toBeLessThan(prompt.lastIndexOf(CURRENT_MESSAGE_ANCHOR));
       expect(prompt.split('\n').filter(line=>line===CURRENT_MESSAGE_ANCHOR)).toHaveLength(1);
       expect(prompt.match(/^\[Private memory\]$/gm)).toHaveLength(1);
     }
@@ -617,3 +621,15 @@ describe('privileged marker framing after Unicode escape', () => {
     expect(prompts[0]).toContain('\\' + CURRENT_MESSAGE_ANCHOR);
   });
 });
+
+ describe('private diagnostic bridge wiring', () => {
+  it.each([false,true])('captures SDK failure provenance only when enabled=%s', async enabled => {
+    scriptedRuns = [async function* () { yield {type:'turn.failed',error:{message:'PRIVATE_SDK_FAILURE'}}; }];
+    let caught:unknown;
+    try { await collect(queryAgent('request',cfg({privateDiagnostics:enabled}))); } catch(error) {caught=error;}
+    expect(caught).toBeInstanceOf(TurnFailure);
+    const row=privateDiagnosticRow((caught as TurnFailure).report,caught);
+    if(enabled)expect(row).toMatchObject({sdk:{event:'turn.failed'}});else expect(row).not.toHaveProperty('sdk');
+    expect(JSON.stringify(row)).not.toContain('PRIVATE_SDK_FAILURE');expect(JSON.stringify(caught)).not.toContain('PRIVATE_SDK_FAILURE');expect(calls).toHaveLength(1);
+  });
+ });

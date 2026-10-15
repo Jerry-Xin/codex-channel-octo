@@ -36,6 +36,7 @@ jobs:
       - run: npm ci
       - run: npm run type-check
       - run: npm run type-check:recovery-tests
+      - run: npm run type-check:continuity-tests
 
   lint:
     name: ESLint (zero warnings)

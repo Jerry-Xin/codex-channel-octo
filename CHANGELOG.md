@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `sdk.privateDiagnostics` saves bounded owner-only failure metadata and SDK message fingerprints. Raw SDK/error/prompt/tool payloads stay excluded; rotation is limited to three 1 MiB files and diagnostic I/O failure cannot alter task behavior.
+
 ### Fixed
 
 - Require exact registered owner identity for online recovery. The current Bot
@@ -15,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aggregate paused-traffic budget, pause-time group-context caching and CI type
   checks for recovery contracts, with real-handler quarantine regressions.
 
+- Allow a new user request or explicit continuation in the same conversation after interrupted execution has stopped. Keep failed-task context and late-callback fencing without automatically replaying the old request; queue new requests during bounded cleanup and retain maintenance protection when teardown cannot be confirmed.
+- Confirm interrupted POSIX teardown using gateway-owned child handles and independent process-group checks; workload-writable proofs never authorize reopening. Preserve interruption context across slash commands until a successful model response is committed.
 - Bind privileged recovery to registration-provided owner identities and allow
   owner-DM recovery of explicit third-party sessions without gateway downtime.
   Paused traffic no longer consumes the global model budget; active tasks have
