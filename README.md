@@ -162,8 +162,7 @@ IM input is **untrusted**; the permission boundary is the **sandbox**, not the p
 
 ### Safe failure handling and recovery
 
-Unknown execution pauses admission across reset/restart; cancellation before SDK
-execution stays clean. New retries default off and cover only positively proven
+After the interrupted handler settles and gateway-owned execution is confirmed stopped, new user requests can run with retained failure context, without replaying the old request. Requests queue during bounded cleanup; missing proof and historical/crash quarantine remain paused across reset/restart. See [session continuity](docs/session-continuity.md). Cancellation before SDK execution stays clean. New retries default off and cover only positively proven
 pre-execution temporary failures. After verifying effects, an owner whose wire
 UID **exactly matches registered owner_uid** can send:
 
@@ -194,7 +193,7 @@ adjusted for long tasks without waiving execution reconciliation.
 
 On macOS/Linux, an executable proxy escapes raw U+2028/U+2029 in CLI stdout before the SDK's `readline` reader. These are legal JSON string characters, but Node v24.10.0 treats them as line endings and can split valid events, yielding `Failed to parse item` and killing the SDK child. Escaping preserves the decoded event contents, including command output; UTF-8 chunks, stdin, stderr, backpressure and signals are forwarded. The proxy resolves the CLI dependency belonging to the installed SDK. Windows retains direct SDK launch; this Unix workaround is not a validated Windows fix.
 
-JSONL parse failures are logged as redacted categories, not rejected event payloads or subprocess stderr. Known threads may resume at most once; uncertain side effects prevent a fresh replay. Invalid events are never silently discarded. Tests reproduce the Node reader behavior and use the real SDK with synthetic executable fixtures, without model/network requests or private notes.
+JSONL parse failures are logged as redacted categories, not rejected event payloads or subprocess stderr. New user-authored turns may reuse the known thread; interrupted turns are never automatically resumed or replayed. Invalid events are never silently discarded. Tests reproduce the Node reader behavior and use the real SDK with synthetic executable fixtures, without model/network requests or private notes.
 
 If the proxy is missing, non-regular or not executable, the adapter warns once with `npm run build` instructions and falls back to direct SDK launch; this fallback does not provide the Unicode workaround. `dev` builds/copies the proxy before starting the TypeScript watcher (re-run build after editing the `.mjs`), and `prepack` builds before packaging. CI validates executable package contents and runs tests on Node 22 and 24.10.0. Bootstrap resolution failures emit a fixed actionable diagnostic, without paths or raw stderr. Logs retain built-in error classes and allowlisted OS/Node error codes; mutable error names/codes are not trusted as safe text.
 

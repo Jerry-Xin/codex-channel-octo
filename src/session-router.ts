@@ -6,7 +6,7 @@ import { isOwnerSender } from './sender-context.js';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { AgentFailure, diagnosticId } from './agent-failure.js';
-import { TurnContext, type TurnLedger } from './turn-context.js';
+import { TurnContext, type TurnLedger, type InterruptedTurn } from './turn-context.js';
 import type { Config } from './config.js';
 import type { BotMessage, MentionEntity } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
@@ -22,6 +22,7 @@ export interface RouteResult {
   message: BotMessage;
   /** User content with leading @botname stripped (for LLM input). */
   cleanContent?: string;
+  interruptedTurn?: InterruptedTurn;
   /**
    * Reason for rejection when shouldProcess is false.
    *
@@ -49,6 +50,7 @@ interface TokenBucket {
 }
 
 const BUCKET_STALE_MS = 5 * 60 * 1000; // 5 minutes
+const CLEANUP_WAIT_MS = 3000;
 
 /** Global rate limit: 10x per-session limit, shared across all sessions. */
 const GLOBAL_RATE_MULTIPLIER = 10;
@@ -76,8 +78,10 @@ export class SessionRouter {
   private readonly executions = new Set<Promise<void>>();
   private readonly turns = new Map<TurnContext, string>();
   private stopping = false;
+  private lifecycleClosed = false;
   private readonly quarantineNotices = new Map<string, number>();
   private readonly quarantined = new Map<string, string>();
+  private readonly pendingCleanup = new Map<string, TurnContext>();
   private readonly ledger?: TurnLedger;
   private readonly conversationMarkdown: ConversationMarkdown;
 
@@ -169,6 +173,18 @@ export class SessionRouter {
     const key = this.sessionKey(msg);
     return this.withSessionLock(key, async () => {
       if (this.stopping) return { sessionKey: key, shouldProcess: false, message: msg, rejectionReason: 'stopping' };
+      // Cleanup is independent of the sender; finish it before computing
+      // admission limits so a newly unblocked model turn pays the global budget.
+      const pending = this.pendingCleanup.get(key);
+      if (pending) {
+        const blocked = this.ledger ? this.ledger.getQuarantinedTurnId(key) : this.quarantined.get(key);
+        if (blocked !== pending.turnId) {
+          pending.disposeExecutions(); this.pendingCleanup.delete(key);
+        } else if (await pending.waitForStopped(0)) {
+          this.ledger?.finishTurn(key,pending.turnId,'clean');
+          this.quarantined.delete(key); this.quarantineNotices.delete(key); this.pendingCleanup.delete(key);
+        }
+      }
       const result = await this.processMessage(msg, key, true);
       if (!result || !result.shouldProcess) return result;
       if (this.stopping) return { ...result, shouldProcess:false, rejectionReason:'stopping' };
@@ -193,6 +209,7 @@ export class SessionRouter {
         return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
       }
       if (result && result.shouldProcess) {
+        result.interruptedTurn = this.ledger?.getInterruption(key);
         const admitted = await this.runHandlerWithTimeout(result, handler);
         if (!admitted) return { ...result, shouldProcess: false, rejectionReason: 'stopping' };
       }
@@ -210,6 +227,11 @@ export class SessionRouter {
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([Promise.allSettled([...this.executions]), new Promise<void>(resolve => { timer = setTimeout(resolve, graceMs); })]);
     if (timer) clearTimeout(timer);
+    this.lifecycleClosed = true;
+    // Settled failed turns are no longer in `turns`/`executions`. Release
+    // their socket resources without treating disposal as stopped proof.
+    for (const pending of this.pendingCleanup.values()) pending.disposeExecutions();
+    this.pendingCleanup.clear();
   }
 
   private async runHandlerWithTimeout(result: RouteResult, handler: (result: RouteResult, turn: TurnContext) => Promise<void>): Promise<boolean> {
@@ -223,17 +245,45 @@ export class SessionRouter {
     // The timeout path remains quarantined even if a cancelled promise settles:
     // subprocess/remote-effect termination cannot be proven by promise completion.
     const task = Promise.resolve().then(() => handler(result, turn));
-    this.executions.add(task);
     const settled = task.then(() => {}, err => {
-      if (!turn.signal.aborted) console.error('session-router: handler error', summarizeAgentError(err));
-    }).finally(() => {
-      this.executions.delete(task); this.turns.delete(turn);
-      turn.revoke();
       if (!turn.signal.aborted) {
-        if (turn.needsReconciliation && !this.ledger) this.quarantined.set(result.sessionKey, turn.turnId);
-        this.ledger?.finishTurn(result.sessionKey, turn.turnId, turn.needsReconciliation ? 'quarantined' : 'clean');
+        turn.interruption = 'failed';
+        console.error('session-router: handler error', summarizeAgentError(err));
+      }
+    }).finally(async () => {
+      turn.revoke();
+      try {
+        if (this.lifecycleClosed) {
+          if (!(await turn.waitForStopped(CLEANUP_WAIT_MS))) turn.disposeExecutions();
+          return;
+        }
+        // Synchronous work can hit its deadline before the timer callback runs.
+        // Keep persisted interruption metadata consistent with timeout feedback.
+        const abortReason = performance.now() >= turn.deadline && !this.stopping ? 'timed_out' : 'cancelled';
+        const interrupted = turn.interruption ?? (turn.signal.aborted ? abortReason : turn.needsReconciliation ? 'failed' : undefined);
+        if (interrupted) {
+          this.ledger?.recordInterruption(result.sessionKey, {turnId:turn.turnId,reason:interrupted,executionRisk:turn.executionRisk,stage:turn.stage});
+          const stopped = await turn.waitForStopped(CLEANUP_WAIT_MS);
+          if (this.lifecycleClosed) {
+            if (!stopped) turn.disposeExecutions();
+            return; // The owner may have closed SQLite.
+          }
+          // Cleanup evidence reopens execution; it never asserts that external
+          // operations rolled back, nor retries the previous user request.
+          if (!stopped && !this.ledger) this.quarantined.set(result.sessionKey,turn.turnId);
+          if (!stopped) this.pendingCleanup.set(result.sessionKey,turn);
+          if (stopped) this.quarantined.delete(result.sessionKey);
+          this.ledger?.finishTurn(result.sessionKey,turn.turnId,stopped ? 'clean' : 'quarantined');
+        } else {
+          turn.disposeExecutions();
+          this.ledger?.finishTurn(result.sessionKey,turn.turnId,'clean');
+          if (turn.interruptionPresented && result.interruptedTurn) this.ledger?.consumeInterruption(result.sessionKey,result.interruptedTurn.turnId);
+        }
+      } finally {
+        this.executions.delete(settled); this.turns.delete(turn);
       }
     });
+    this.executions.add(settled);
     let onAbort!: () => void;
     const cancelled = new Promise<void>(resolve => {
       onAbort = resolve; turn.signal.addEventListener('abort', onAbort, { once:true });
@@ -241,24 +291,41 @@ export class SessionRouter {
     try {
       const waits: Promise<void>[] = [settled, cancelled];
       if (this.config.dispatchTimeoutMs > 0) waits.push(new Promise<void>(resolve => {
-        timeout = setTimeout(() => { timedOut = true; turn.cancel(); resolve(); }, this.config.dispatchTimeoutMs);
+        timeout = setTimeout(() => { timedOut = true; turn.interruption = 'timed_out'; turn.cancel(); resolve(); }, this.config.dispatchTimeoutMs);
       }));
       await Promise.race(waits);
       if ((timedOut || performance.now() >= turn.deadline) && !this.stopping) {
+        turn.interruption = 'timed_out';
         this.finishCancelledTurn(result.sessionKey, turn);
-        await this.replySafe(result.message, turn.executionRisk === 'proven_not_started' ? `⚠️ 任务超时，模型执行未启动；可以发送新任务。编号 ${turn.turnId}` : this.pauseNotice(result.message, result.sessionKey, turn.turnId));
+        await this.replySafe(result.message, turn.executionRisk === 'proven_not_started' ? `⚠️ 任务超时，模型执行未启动；可以发送新任务。编号 ${turn.turnId}` : `⚠️ 任务超时，正在停止原执行。新请求将等待停止完成；部分操作可能已完成。编号 ${turn.turnId}`);
+        await this.waitForCleanup(settled, result, turn);
       } else if (turn.signal.aborted && !this.stopping) {
         this.finishCancelledTurn(result.sessionKey, turn);
-        await this.replySafe(result.message, turn.executionRisk === 'proven_not_started' ? `⚠️ 任务已取消，模型执行未启动；可以发送新任务。编号 ${turn.turnId}` : this.pauseNotice(result.message, result.sessionKey, turn.turnId));
+        await this.replySafe(result.message, `⚠️ 任务已取消，正在停止原执行。编号 ${turn.turnId}`);
+        await this.waitForCleanup(settled, result, turn);
       }
     } finally { if (timeout) clearTimeout(timeout); turn.signal.removeEventListener('abort',onAbort); }
     return true;
   }
 
   private finishCancelledTurn(session: string, turn: TurnContext): void {
+    turn.interruption ??= 'cancelled';
+    this.ledger?.recordInterruption(session,{turnId:turn.turnId,reason:turn.interruption,executionRisk:turn.executionRisk,stage:turn.stage});
     const uncertain = turn.executionRisk !== 'proven_not_started';
     if (uncertain && !this.ledger) this.quarantined.set(session, turn.turnId);
     this.ledger?.finishTurn(session, turn.turnId, uncertain ? 'quarantined' : 'clean');
+  }
+
+  private async waitForCleanup(settled: Promise<void>, result: RouteResult, turn: TurnContext): Promise<void> {
+    if (turn.executionRisk === 'proven_not_started') return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const ended = await Promise.race([settled.then(() => true),new Promise<boolean>(resolve => {timer=setTimeout(()=>resolve(false),CLEANUP_WAIT_MS);})]);
+      const paused = this.ledger ? this.ledger.getQuarantinedTurnId(result.sessionKey) : this.quarantined.get(result.sessionKey);
+      await this.replySafe(result.message, ended && !paused
+        ? `✓ 原任务执行已结束。可以发送新任务，或要求继续上个任务；不会自动重跑。编号 ${turn.turnId}`
+        : `⚠️ 原任务停止尚未确认，后续请求会重新检查清理结果。${this.pauseNotice(result.message,result.sessionKey,turn.turnId)}`);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   private isControlOwner(msg: BotMessage): boolean {

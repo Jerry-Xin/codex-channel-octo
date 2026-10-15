@@ -40,6 +40,12 @@ describe('opt-in private diagnostics',()=>{
   const row=JSON.stringify(privateDiagnosticRow(unsafe,error));expect(row).not.toMatch(/PRIVATE_CODE|PRIVATE_BODY|PRIVATE_CATEGORY|PRIVATE_STACK|9999/);
   const known=Object.assign(new Error('PRIVATE'),{code:'EAGAIN'});rememberSdkFailure(known,'exception',known.message);expect(privateDiagnosticRow(report,known)).toMatchObject({sdk:{code:'EAGAIN'}});
  });
+ it('retains main API failure categories in persisted diagnostics after integration',()=>{
+  const snapshot={stage:'prepare' as const,category:'api_failed' as const,source:'octo_api' as const,evidence:'structured' as const,httpStatus:503};
+  const failure={...report,first:snapshot,final:snapshot};
+  expect(recordPrivateFailure(root,true,failure,new AgentFailure(snapshot))).toBe(true);
+  expect(read()).toMatchObject({first:{category:'api_failed',httpStatus:503},final:{category:'api_failed',httpStatus:503}});
+ });
  it('retains diagnostics through the real recovery wrapper without changing retry eligibility',async()=>{
   let calls=0,caught:unknown;
   try {for await(const value of recover(async function*(){calls++;const e=new AgentFailure(report.final);rememberSdkFailure(e,'error','PRIVATE');throw e;yield '';},{id,risk:()=> 'effects_observed',config:{enabled:true}}))void value;}catch(error){caught=error;}

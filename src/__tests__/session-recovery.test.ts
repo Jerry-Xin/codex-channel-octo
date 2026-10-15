@@ -244,6 +244,7 @@ describe('paused session recovery', () => {
     turn.assertPublishable();
   });
   expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('任务超时');
+  expect(store.getInterruption('owner')).toMatchObject({ reason: 'timed_out' });
   expect(store.isTurnQuarantined('owner')).toBe(false);
  });
 
