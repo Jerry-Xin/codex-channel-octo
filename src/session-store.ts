@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS turn_execution (
   state TEXT NOT NULL CHECK(state IN ('active','clean','quarantined')),
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS interrupted_turns (
+  turn_id TEXT PRIMARY KEY, session_key TEXT NOT NULL,
+  reason TEXT NOT NULL, execution_risk TEXT NOT NULL, stage TEXT NOT NULL,
+  context_pending INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS interrupted_session ON interrupted_turns(session_key, created_at);
 CREATE INDEX IF NOT EXISTS turn_execution_turn_idx ON turn_execution(turn_id);
 CREATE TABLE IF NOT EXISTS turn_outputs (
   turn_id TEXT PRIMARY KEY, session_key TEXT NOT NULL, content TEXT NOT NULL,
@@ -162,6 +168,21 @@ export class SessionStore {
   }
   finishTurn(session: string, turnId: string, state: 'clean' | 'quarantined'): void {
     this.adapter.prepare('UPDATE turn_execution SET state=?, updated_at=? WHERE session_key=? AND turn_id=?').run(state, Date.now(), session, turnId);
+  }
+  recordInterruption(session: string, turn: import('./turn-context.js').InterruptedTurn): void {
+    this.adapter.prepare(`INSERT OR IGNORE INTO interrupted_turns(turn_id,session_key,reason,execution_risk,stage,created_at)
+      SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM turn_execution WHERE session_key=? AND turn_id=?)`)
+      .run(turn.turnId,session,turn.reason,turn.executionRisk,turn.stage,Date.now(),session,turn.turnId);
+  }
+  getInterruption(session: string): import('./turn-context.js').InterruptedTurn | undefined {
+    const row = this.adapter.prepare(`SELECT turn_id AS turnId, reason, execution_risk AS executionRisk, stage
+      FROM interrupted_turns WHERE session_key=? AND context_pending=1 ORDER BY rowid DESC LIMIT 1`)
+      .get(session) as import('./turn-context.js').InterruptedTurn | undefined;
+    return row;
+  }
+  consumeInterruption(session: string, turnId: string): void {
+    this.adapter.prepare(`UPDATE interrupted_turns SET context_pending=0 WHERE session_key=? AND rowid <=
+      (SELECT rowid FROM interrupted_turns WHERE session_key=? AND turn_id=?)`).run(session,session,turnId);
   }
   saveTurnOutput(turnId: string, session: string, text: string, seq?: number, bot?: string): void {
     this.adapter.prepare('INSERT INTO turn_outputs(turn_id,session_key,content,message_seq,bot_name,created_at) VALUES (?,?,?,?,?,?)').run(turnId, session, text, seq ?? null, bot ?? null, Date.now());
@@ -330,6 +351,7 @@ export class SessionStore {
 
   cleanExpired(): number {
     const cutoff = Date.now() - SEVEN_DAYS_MS;
+    this.adapter.prepare('DELETE FROM interrupted_turns WHERE context_pending=0 AND created_at < ?').run(cutoff);
     // Keep unresolved execution evidence; completed tombstones can expire.
     this.adapter.prepare("DELETE FROM turn_execution WHERE state='clean' AND updated_at < ?").run(cutoff);
     // The admission tombstone and the evidence needed for reconciliation share

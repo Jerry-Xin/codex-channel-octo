@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Allow a new user request or explicit continuation in the same conversation after interrupted execution has stopped. Keep failed-task context and late-callback fencing without automatically replaying the old request; queue new requests during bounded cleanup and retain maintenance protection when teardown cannot be confirmed.
+- Confirm interrupted POSIX teardown using gateway-owned child handles and independent process-group checks; workload-writable proofs never authorize reopening. Preserve interruption context across slash commands until a successful model response is committed.
 - Bind privileged recovery to registration-provided owner identities and allow
   owner-DM recovery of explicit third-party sessions without gateway downtime.
   Paused traffic no longer consumes the global model budget; active tasks have
