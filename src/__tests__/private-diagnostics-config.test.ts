@@ -18,3 +18,13 @@ describe('private diagnostic configuration',()=>{
  it.each(['true',1,null,[],{}])('rejects invalid effective value %j',value=>expect(config({privateDiagnostics:value})).toThrow('must be a boolean'));
  it('validates the per-bot override',()=>expect(config({privateDiagnostics:false},{privateDiagnostics:'false'})).toThrow('must be a boolean'));
 });
+
+describe('separate detailed diagnostic configuration',()=>{
+ it('defaults to absent even when hash-only diagnostics are enabled',()=>expect(config({privateDiagnostics:true})().sdk.privateDiagnosticsDetails).toBeUndefined());
+ it.each([true,false])('inherits and overrides detail=%s',value=>{
+  expect(config({privateDiagnosticsDetails:value})().sdk.privateDiagnosticsDetails).toBe(value);
+  expect(config({privateDiagnosticsDetails:value},{privateDiagnosticsDetails:!value})().sdk.privateDiagnosticsDetails).toBe(!value);
+ });
+ it.each(['true',1,null,[],{}])('rejects invalid detailed value %j',value=>expect(config({privateDiagnosticsDetails:value})).toThrow('privateDiagnosticsDetails must be a boolean'));
+ it('validates per-bot detailed values',()=>expect(config({},{privateDiagnosticsDetails:'false'})).toThrow('privateDiagnosticsDetails must be a boolean'));
+});

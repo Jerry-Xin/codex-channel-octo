@@ -11,6 +11,7 @@ import { describe, it, expect, expectTypeOf, vi, beforeEach } from 'vitest';
 type Ev = Record<string, unknown>;
 let scriptedRuns: Array<() => AsyncGenerator<Ev>>;
 let runIdx: number;
+let constructorError: Error | undefined;
 
 function makeThread() {
   return {
@@ -25,6 +26,7 @@ function makeThread() {
 
 vi.mock('@openai/codex-sdk', () => ({
   Codex: class {
+    constructor() { if(constructorError) throw constructorError; }
     startThread() {
       return makeThread();
     }
@@ -83,6 +85,7 @@ const staleErr = 'thread not found';
 
 beforeEach(() => {
   runIdx = 0;
+  constructorError = undefined;
   scriptedRuns = [];
 });
 
@@ -313,4 +316,145 @@ describe('unlabeled SDK events through default output selection', () => {
     observed.forEach(event => collector.push(event));
     expect(collector.select({ mode: DEFAULT_OUTPUT_SELECTION_MODE, maxChars: 1000 }).text).toBe('Useful answer');
   });
+});
+
+// Provenance is local only and must not acquire execution/retry authority.
+import { createHash } from 'node:crypto';
+import { privateDiagnosticRow } from '../private-diagnostics.js';
+import { failureReply } from '../agent-failure.js';
+describe('detailed SDK diagnostics through the bridge',()=>{
+ const id='3f8d62cf-fca8-4e92-a0a0-cdb5db5c6ab2';
+ async function failed(config:Config,resume?:string) {
+  try {for await(const ev of queryAgentEvents('PRIVATE_PROMPT',config,undefined,undefined,{resume,diagnosticId:id}))void ev;}
+  catch(error){expect(error).toBeInstanceOf(TurnFailure);return error as TurnFailure;}
+  throw Error('expected failure');
+ }
+ it.each(['item.started','item.updated','item.completed','turn.failed','error','exception'])('captures %s before classification and preserves the failure',async type=>{
+  const fields={message:'PRIVATE_SDK_FAILURE',code:'invalid_encrypted_content',status:400,exitCode:9,signal:'SIGTERM',stderr:'PRIVATE_STDERR'};
+  scriptedRuns=[async function*(){yield started('PRIVATE_THREAD');yield {type:'turn.started',turn_id:'PRIVATE_TURN'};
+   if(type==='exception')throw Object.assign(new Error(fields.message),fields);
+   if(type.startsWith('item.'))yield {type,item:{...fields,id:'error',type:'error'}};
+   else if(type==='turn.failed')yield {type,error:fields};else yield {type,...fields};
+  }];
+  const config=cfg();config.sdk={privateDiagnostics:true,privateDiagnosticsDetails:true,recovery:{enabled:true}};
+  const error=await failed(config,'PRIVATE_RESUME');
+  expect(error.report).toMatchObject({diagnosticId:id,attempts:1,decision:'blocked_uncertain',final:{category:'unknown'}});
+  const row=privateDiagnosticRow(error.report,error);
+  expect(row).toMatchObject({diagnosticId:id,sdk:{event:type.startsWith('item.')?'item.error':type,detail:{code:fields.code,status:400,
+   exitCode:9,signal:'SIGTERM',exitSource:'own_field',eventSubtype:type,mode:'resume',attempt:0,
+   resumeFingerprint:createHash('sha256').update('PRIVATE_RESUME').digest('hex'),
+   threadFingerprint:createHash('sha256').update('PRIVATE_THREAD').digest('hex'),turnFingerprint:createHash('sha256').update('PRIVATE_TURN').digest('hex')}}});
+  expect(JSON.stringify(row)).not.toMatch(/PRIVATE_|stderr/);expect(JSON.stringify(error)).not.toMatch(/PRIVATE_|"sdk":|Fingerprint|exitCode/);
+  expect(failureReply(error.report)).not.toMatch(/PRIVATE_|"sdk":|Fingerprint|exitCode/);expect(runIdx).toBe(1);
+ });
+ it.each([[undefined,undefined],[true,undefined],[false,true],[undefined,true],[true,true]])('requires both flags (private=%s, detailed=%s)',async(enabled,detailed)=>{
+  scriptedRuns=[async function*(){yield started('PRIVATE_THREAD');yield {type:'turn.failed',error:{message:'rate limit exceeded',status:429}};}];
+  const config=cfg();config.sdk={privateDiagnostics:enabled,privateDiagnosticsDetails:detailed};const error=await failed(config);
+  const row=privateDiagnosticRow(error.report,error);
+  if(enabled)expect(row).toHaveProperty('sdk');else expect(row).not.toHaveProperty('sdk');
+  if(enabled&&detailed){expect(row).toMatchObject({sdk:{detail:{mode:'start',attempt:0,templateId:'rate_limit',status:429}}});expect(row).not.toHaveProperty('sdk.detail.resumeFingerprint');}
+  else expect(row).not.toHaveProperty('sdk.detail');
+  expect(error.report).toMatchObject({diagnosticId:id,attempts:1,final:{category:'rate_limited',httpStatus:429}});expect(runIdx).toBe(1);
+ });
+ it('keeps the final retry attempt correlation distinct',async()=>{
+  scriptedRuns=[async function*(){throw Object.assign(new Error('spawn synthetic'),{code:'EAGAIN',syscall:'spawn proxy'});},
+   async function*(){yield started('new-thread');yield {type:'error',message:'PRIVATE_FINAL'};}];
+  const config=cfg();config.sdk={privateDiagnostics:true,privateDiagnosticsDetails:true,recovery:{enabled:true,baseDelayMs:1,maxDelayMs:1}};
+  const error=await failed(config);
+  expect(error.report).toMatchObject({attempts:2,final:{category:'unknown'}});
+  expect(privateDiagnosticRow(error.report,error)).toMatchObject({sdk:{event:'error',detail:{mode:'start',attempt:1,threadFingerprint:createHash('sha256').update('new-thread').digest('hex')}}});
+  expect(runIdx).toBe(2);
+ });
+});
+
+describe('notice correlation without broader suppression',()=>{
+ it('records only a fixed notice ID then still throws the real failure',async()=>{
+  const warning=vi.spyOn(console,'warn').mockImplementation(()=>{});
+  const config=cfg();config.sdk={privateDiagnostics:true,privateDiagnosticsDetails:true};
+  scriptedRuns=[async function*(){yield {type:'item.completed',item:{id:'notice',type:'error',message:'Model metadata for `PRIVATE_MODEL` not found. Defaulting to fallback metadata.'}};
+   yield {type:'turn.failed',error:{message:'PRIVATE_REAL_FAILURE with notice keywords model metadata'}};}];
+  let caught:unknown;
+  try{for await(const event of queryAgentEvents('request',config))void event;}catch(error){caught=error;}finally{warning.mockRestore();}
+  expect(caught).toBeInstanceOf(TurnFailure);const failure=caught as TurnFailure;
+  expect(privateDiagnosticRow(failure.report,failure)).toMatchObject({sdk:{event:'turn.failed',detail:{noticeTemplateId:'model_metadata_notice'}}});
+  expect(JSON.stringify(privateDiagnosticRow(failure.report,failure))).not.toMatch(/PRIVATE_/);expect(runIdx).toBe(1);
+ });
+});
+
+describe('proxy correlation review regression',()=>{
+ it.each(['thread.started','turn.started'])('never executes a diagnostic descriptor trap on %s',async type=>{
+  let traps=0;
+  const event=new Proxy({type,thread_id:'PRIVATE_THREAD',turn_id:'PRIVATE_TURN'}, {
+   getOwnPropertyDescriptor(target,key){traps++;return Reflect.getOwnPropertyDescriptor(target,key);},
+  });
+  scriptedRuns=[async function*(){yield event;yield {type:'error',message:'PRIVATE_FAILURE'};}];
+  const config=cfg();config.sdk={privateDiagnostics:true,privateDiagnosticsDetails:true};let caught:unknown;
+  try{for await(const value of queryAgentEvents('request',config))void value;}catch(error){caught=error;}
+  expect(traps).toBe(0);expect(caught).toBeInstanceOf(TurnFailure);const failure=caught as TurnFailure;
+  const row=privateDiagnosticRow(failure.report,failure);
+  expect(row).toMatchObject({sdk:{event:'error',detail:{mode:'start'}}});
+  expect(row).not.toHaveProperty('sdk.detail.threadFingerprint');expect(row).not.toHaveProperty('sdk.detail.turnFingerprint');
+ });
+});
+
+describe('review regressions: SDK accessors and hash-only provenance',()=>{
+ it.each([{}, {privateDiagnostics:true}, {privateDiagnostics:true,privateDiagnosticsDetails:true}])('reads SDK accessors once regardless of diagnostic flags %j',async sdk=>{
+  for (const type of ['item.started','item.updated','item.completed','turn.failed','error']) {
+   let typeReads=0,errorReads=0,messageReads=0;
+   const fields={get message(){if(++messageReads>1)throw Error('PRIVATE_SECOND_MESSAGE_READ');return 'rate limit exceeded';}};
+   const event={get type(){if(++typeReads>1)throw Error('PRIVATE_SECOND_TYPE_READ');return type;},
+    get error(){if(++errorReads>1)throw Error('PRIVATE_SECOND_ERROR_READ');return fields;},
+    get message(){return fields.message;},item:{id:'error',type:'error',get message(){return fields.message;}}};
+   runIdx=0;scriptedRuns=[async function*(){yield event;}];const config=cfg();config.sdk=sdk;let caught:unknown;
+   try{for await(const value of queryAgentEvents('request',config))void value;}catch(error){caught=error;}
+   expect(caught).toBeInstanceOf(TurnFailure);const failure=caught as TurnFailure;
+   expect(failure.report).toMatchObject({attempts:1,final:{category:'rate_limited',httpStatus:429}});
+   expect(typeReads).toBe(1);expect(messageReads).toBe(1);expect(errorReads).toBe(type==='turn.failed'?1:0);
+   if(sdk.privateDiagnostics)expect(privateDiagnosticRow(failure.report,failure)).toMatchObject({sdk:{event:type.startsWith('item.')?'item.error':type,
+    fingerprint:createHash('sha256').update('rate limit exceeded').digest('hex'),messageBytes:19}});
+  }
+ });
+ it('preserves original hash-only event and fingerprint when optional detail fields are a proxy',async()=>{
+  let traps=0;const message='stream closed before response.completed';
+  const fields=new Proxy({message},{getOwnPropertyDescriptor(target,key){traps++;return Reflect.getOwnPropertyDescriptor(target,key);}});
+  scriptedRuns=[async function*(){yield {type:'turn.failed',error:fields};}];const config=cfg();config.sdk={privateDiagnostics:true};let caught:unknown;
+  try{for await(const value of queryAgentEvents('request',config))void value;}catch(error){caught=error;}
+  const failure=caught as TurnFailure;expect(failure).toBeInstanceOf(TurnFailure);expect(traps).toBe(0);
+  expect(failure.report.final.category).toBe('stream_interrupted');
+  const row=privateDiagnosticRow(failure.report,failure);
+  expect(row).toMatchObject({sdk:{event:'turn.failed',fingerprint:createHash('sha256').update(message).digest('hex'),messageBytes:39,fingerprintTruncated:false}});
+  expect(row).not.toHaveProperty('sdk.detail');
+ });
+});
+
+
+describe('SDK construction diagnostic coverage',()=>{
+ it.each([{}, {privateDiagnostics:true}, {privateDiagnosticsDetails:true}, {privateDiagnostics:true,privateDiagnosticsDetails:true}])('preserves construction failure behavior %j',async sdk=>{
+  constructorError=Object.assign(new Error('PRIVATE_CONSTRUCTION_FAILURE'),{code:'ENOENT'});
+  const config=cfg();config.sdk={...sdk,recovery:{enabled:true}};let caught:unknown;
+  try{for await(const value of queryAgentEvents('request',config,undefined,undefined,{resume:'PRIVATE_RESUME'}))void value;}catch(error){caught=error;}
+  expect(caught).toBe(constructorError);expect(caught).not.toBeInstanceOf(TurnFailure);expect(runIdx).toBe(0);
+  const report={diagnosticId:'3f8d62cf-fca8-4e92-a0a0-cdb5db5c6ab2',attempts:1,decision:'not_attempted' as const,executionRisk:'unknown' as const,
+   first:{stage:'inference' as const,category:'unknown' as const,source:'sdk_exception' as const,evidence:'unknown' as const},
+   final:{stage:'inference' as const,category:'unknown' as const,source:'sdk_exception' as const,evidence:'unknown' as const}};
+  const row=privateDiagnosticRow(report,caught);
+  if(sdk.privateDiagnostics && sdk.privateDiagnosticsDetails){
+   expect(row).toMatchObject({sdk:{event:'exception',code:'ENOENT',detail:{code:'ENOENT',mode:'resume',attempt:0,eventSubtype:'exception',
+    resumeFingerprint:createHash('sha256').update('PRIVATE_RESUME').digest('hex')}}});
+  }else expect(row).not.toHaveProperty('sdk');
+  expect(JSON.stringify(row)).not.toMatch(/PRIVATE_/);
+ });
+});
+
+
+describe('constructor prototype-proxy review regressions',()=>{
+ it.each(['throw','mutate'])('never traverses an error prototype during constructor diagnostics: %s',async behavior=>{
+  for(const sdk of [{}, {privateDiagnostics:true}, {privateDiagnostics:true,privateDiagnosticsDetails:true}]){
+   let traps=0;const original=new Error('PRIVATE_ORIGINAL');const replacement=new Error('PRIVATE_REPLACEMENT');
+   Object.setPrototypeOf(original,new Proxy(Error.prototype,{getPrototypeOf(){traps++;if(behavior==='throw')throw replacement;original.message='PRIVATE_MUTATED';return Error.prototype;}}));
+   constructorError=original;const config=cfg();config.sdk=sdk;let caught:unknown;
+   try{for await(const value of queryAgentEvents('request',config))void value;}catch(error){caught=error;}
+   expect(caught).toBe(original);expect(traps).toBe(0);expect(original.message).toBe('PRIVATE_ORIGINAL');expect(runIdx).toBe(0);
+  }
+ });
 });

@@ -1,4 +1,5 @@
-import { rememberSdkFailure } from './private-diagnostics.js';
+import { types as utilTypes } from 'node:util';
+import { rememberSdkFailure, inheritSdkDiagnostic, type SdkDiagnosticRun } from './private-diagnostics.js';
 import { recover, type RecoveryConfig } from './agent-recovery.js';
 import { AgentFailure, classifyFailure, type ExecutionRisk } from './agent-failure.js';
 import { ExecutionScope, type ManagedExecution } from './execution-scope.js';
@@ -432,7 +433,22 @@ export async function* queryAgentEvents(
     ...(config.sdk.codexBaseUrl ? { baseUrl: config.sdk.codexBaseUrl } : {}),
     ...(env ? { env } : {}),
   };
-  const codex = opts?.onManagedExecution ? undefined : new Codex(codexOptions);
+  let codex: Codex | undefined;
+  try { codex = opts?.onManagedExecution ? undefined : new Codex(codexOptions); }
+  catch (error) {
+    // Construction predates recovery. Preserve that boundary and the original
+    // thrown object; extend capture only under the separate detailed opt-in.
+    try {
+      // instanceof can traverse a proxy prototype even on a non-proxy Error.
+      if (config.sdk.privateDiagnostics === true && config.sdk.privateDiagnosticsDetails === true
+        && !utilTypes.isProxy(error) && utilTypes.isNativeError(error)) {
+        const message: unknown = Object.getOwnPropertyDescriptor(error, 'message')?.value;
+        rememberSdkFailure(error,'exception',message,{detailed:true,fields:error,eventSubtype:'exception',
+          run:{mode:opts?.resume ? 'resume' : 'start',attempt:0,resumeId:opts?.resume}});
+      }
+    } catch { /* Diagnostic trouble must never replace the construction error. */ }
+    throw error;
+  }
   const threadOpts = buildThreadOptions(config, cwd);
   // Do not execute with stale instructions or silently re-enable a sandbox
   // the operator explicitly disabled (which may be unavailable in a container).
@@ -468,10 +484,15 @@ export async function* queryAgentEvents(
   let seq = 0;
   let attemptScope: ExecutionScope | undefined;
 
-  const sdkFailure = (message: string, event: 'item.error' | 'turn.failed' | 'error'): AgentFailure => {
-    const error = new AgentFailure(classifyFailure(new Error(message), 'sdk_event'));
-    if (config.sdk.privateDiagnostics === true) rememberSdkFailure(error,event,message);
-    return error;
+  let diagnosticRun: SdkDiagnosticRun | undefined;
+  const sdkFailure = (message: string, event: 'item.error' | 'turn.failed' | 'error', fields: unknown, eventSubtype: string): AgentFailure => {
+    // Capture before classification collapses the original SDK data. Provenance
+    // stays in the private WeakMap and has no classification/retry authority.
+    const original = new Error(message);
+    if (config.sdk.privateDiagnostics === true) rememberSdkFailure(original,event,message, {
+      detailed:config.sdk.privateDiagnosticsDetails === true, fields, eventSubtype, run:diagnosticRun,
+    });
+    return inheritSdkDiagnostic(new AgentFailure(classifyFailure(original, 'sdk_event')), original);
   };
 
   // Drain one CLI execution; track positive effects independently from absence
@@ -482,6 +503,7 @@ export async function* queryAgentEvents(
     sideEffect: { seen: boolean },
   ): AsyncIterable<AgentOutputEvent> {
     const attempt = attemptCount++;
+    diagnosticRun = {mode:resumeId ? 'resume' : 'start', attempt, resumeId};
     const scope = opts?.onManagedExecution ? new ExecutionScope() : undefined;
     attemptScope = scope;
     if (scope) opts?.onManagedExecution?.(scope);
@@ -521,11 +543,21 @@ export async function* queryAgentEvents(
     for await (const ev of events as AsyncIterable<ThreadEvent>) {
       opts?.signal?.throwIfAborted();
       opts?.assertPublishable?.();
-      switch (ev.type) {
+      const eventType = ev.type;
+      switch (eventType) {
         case 'thread.started': {
+          if (config.sdk.privateDiagnostics === true && config.sdk.privateDiagnosticsDetails === true && diagnosticRun && !utilTypes.isProxy(ev)) {
+            try { diagnosticRun.threadId = Object.getOwnPropertyDescriptor(ev, 'thread_id')?.value; } catch { /* diagnostics only */ }
+          }
           if (!reportedSessionId && opts?.onSessionId && ev.thread_id) {
             reportedSessionId = true;
             opts.onSessionId(ev.thread_id, prompt);
+          }
+          break;
+        }
+        case 'turn.started': {
+          if (config.sdk.privateDiagnostics === true && config.sdk.privateDiagnosticsDetails === true && diagnosticRun && !utilTypes.isProxy(ev)) {
+            try { diagnosticRun.turnId = Object.getOwnPropertyDescriptor(ev, 'turn_id')?.value; } catch { /* diagnostics only */ }
           }
           break;
         }
@@ -576,6 +608,9 @@ export async function* queryAgentEvents(
             // known notices; genuine tool/model failures must still throw.
             const modelChanged = /^This session was recorded with model `([^`\r\n]+)` but is resuming with `[^`\r\n]+`\. Consider switching back to `\1` as it may affect Codex performance\.$/.test(itemMsg);
             if (modelChanged || /^Model metadata for `[^`\r\n]+` not found\. Defaulting to fallback metadata(?:[.;]|$)/i.test(itemMsg)) {
+              if (diagnosticRun && config.sdk.privateDiagnostics === true && config.sdk.privateDiagnosticsDetails === true) {
+                diagnosticRun.noticeTemplateId = modelChanged ? 'model_changed_notice' : 'model_metadata_notice';
+              }
               console.warn('[codex-channel-octo] non-fatal codex model notice');
             } else {
               // A genuine failed tool/model step reported AS an item (distinct
@@ -583,7 +618,7 @@ export async function* queryAgentEvents(
               // error so the turn doesn't silently produce zero output (which
               // would look like "no response") and so stale-resume detection can
               // run. Any side effect already seen suppresses retry.
-              throw sdkFailure(itemMsg, 'item.error');
+              throw sdkFailure(itemMsg, 'item.error', item, eventType);
             }
           } else if (
             (item.type === 'reasoning' || item.type === 'todo_list') &&
@@ -603,10 +638,12 @@ export async function* queryAgentEvents(
           // usage available on ev.usage — left for observability.
           completed = true;
           break;
-        case 'turn.failed':
-          throw sdkFailure(ev.error?.message ?? '', 'turn.failed');
+        case 'turn.failed': {
+          const sdkError = ev.error;
+          throw sdkFailure(sdkError?.message ?? '', 'turn.failed', sdkError, 'turn.failed');
+        }
         case 'error':
-          throw sdkFailure(ev.message ?? '', 'error');
+          throw sdkFailure(ev.message ?? '', 'error', ev, 'error');
       }
     }
 
@@ -623,7 +660,9 @@ export async function* queryAgentEvents(
     if (starts++ > 0) attemptCtx = { reason: 'request_retry', continues: null };
     try { yield* runOnce(opts?.resume, promptText, sideEffect); }
     catch (error) {
-      if (config.sdk.privateDiagnostics === true && error instanceof Error) rememberSdkFailure(error,'exception',error.message);
+      if (config.sdk.privateDiagnostics === true && error instanceof Error) rememberSdkFailure(error,'exception',error.message, {
+        detailed:config.sdk.privateDiagnosticsDetails === true, fields:error, eventSubtype:'exception', run:diagnosticRun,
+      });
       const failure = classifyFailure(error);
       // An OS spawn failure positively establishes that this process never ran.
       // No event absence, thread ID absence or sandbox setting is such evidence.
