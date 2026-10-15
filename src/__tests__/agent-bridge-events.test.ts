@@ -356,6 +356,41 @@ describe('detailed SDK diagnostics through the bridge',()=>{
   else expect(row).not.toHaveProperty('sdk.detail');
   expect(error.report).toMatchObject({diagnosticId:id,attempts:1,final:{category:'rate_limited',httpStatus:429}});expect(runIdx).toBe(1);
  });
+ it.each(Array.from({length:8},(_,bits)=>[Boolean(bits&1),Boolean(bits&2),Boolean(bits&4)]))('requires all three flags private=%s detail=%s text=%s',async(enabled,detailed,text)=>{
+  scriptedRuns=[async function*(){yield {type:'turn.failed',error:{message:'unknown short error token=SECRET',status:400}};}];
+  const config=cfg();config.sdk={privateDiagnostics:enabled,privateDiagnosticsDetails:detailed,privateDiagnosticsText:text};
+  const error=await failed(config);const row=privateDiagnosticRow(error.report,error);
+  if(enabled&&detailed&&text)expect(row).toHaveProperty('sdk.text','unknown short error [redacted]');
+  else expect(row).not.toHaveProperty('sdk.text');
+  expect(JSON.stringify(error)).not.toMatch(/SECRET|redacted|"sdk":/);expect(failureReply(error.report)).not.toContain('redacted');
+  expect(error.report).toMatchObject({attempts:1,final:{category:'unknown'}});expect(runIdx).toBe(1);
+ });
+ it.each(['onSessionId','onExecutionRisk','assertPublishable','onManagedExecution','abort'] as const)('does not retain local %s error text',async kind=>{
+  scriptedRuns=[async function*(){yield started('thread');yield turnDone;}];
+  const config=cfg();config.sdk={privateDiagnostics:true,privateDiagnosticsDetails:true,privateDiagnosticsText:true};
+  const controller=new AbortController();const localError=new Error('LOCAL_CALLBACK_PAYLOAD');
+  const options:QueryAgentOptions={diagnosticId:id};
+  if(kind==='abort'){controller.abort(localError);options.signal=controller.signal;}
+  else options[kind]=()=>{throw localError;};
+  let caught:unknown;
+  try{for await(const value of queryAgentEvents('request',config,undefined,undefined,options))void value;}catch(error){caught=error;}
+  expect(caught).toBeInstanceOf(Error);
+  const report={diagnosticId:id,attempts:1,decision:'not_attempted' as const,executionRisk:'unknown' as const,
+   first:{stage:'inference' as const,category:'unknown' as const,source:'local' as const,evidence:'unknown' as const},
+   final:{stage:'inference' as const,category:'unknown' as const,source:'local' as const,evidence:'unknown' as const}};
+  expect(privateDiagnosticRow(report,caught)).not.toHaveProperty('sdk.text');
+ });
+ it.each(['item.started','item.updated','item.completed','turn.failed','error','exception'])('retains only SDK %s message text through recovery',async type=>{
+  const message='unrecognized SDK failure';
+  scriptedRuns=[async function*(){
+   if(type==='exception')throw new Error(message);
+   if(type.startsWith('item.'))yield {type,item:{id:'error',type:'error',message,stderr:'STDERR_SECRET'}};
+   else if(type==='turn.failed')yield {type,error:{message}};else yield {type,message};
+  }];
+  const config=cfg();config.sdk={privateDiagnostics:true,privateDiagnosticsDetails:true,privateDiagnosticsText:true};
+  const error=await failed(config);expect(privateDiagnosticRow(error.report,error)).toHaveProperty('sdk.text',message);
+  expect(JSON.stringify(error)).not.toContain(message);expect(failureReply(error.report)).not.toContain(message);
+ });
  it('keeps the final retry attempt correlation distinct',async()=>{
   scriptedRuns=[async function*(){throw Object.assign(new Error('spawn synthetic'),{code:'EAGAIN',syscall:'spawn proxy'});},
    async function*(){yield started('new-thread');yield {type:'error',message:'PRIVATE_FINAL'};}];

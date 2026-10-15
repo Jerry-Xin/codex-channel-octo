@@ -187,3 +187,52 @@ describe('review regressions: proxies and status aliases',()=>{
   expect(privateDiagnosticRow(report,error)).toMatchObject({sdk:{detail:{status:expected}}});
  });
 });
+
+ describe('temporary scrubbed SDK message capture',()=>{
+  function capture(message:string, text=true, detailed=true) {
+   const error=new Error(message,{cause:new Error('CAUSE_SECRET')});
+   rememberSdkFailure(error,'exception',message,{detailed,text,fields:{stderr:'STDERR_SECRET',prompt:'PROMPT_SECRET'}});
+   return error;
+  }
+  it.each([[false,false],[true,false],[false,true]])('requires text=%s and detail=%s', (text,detailed)=>{
+   expect(privateDiagnosticRow(report,capture('short unknown failure',text,detailed))).not.toHaveProperty('sdk.text');
+  });
+  it('retains an unknown 78-byte error after scrubbing and through wrappers, only privately',()=>{
+   const message='Unexpected transport rejection at dispatch boundary; opaque diagnostic code 12';
+   expect(Buffer.byteLength(message)).toBe(78);
+   const error=capture(message);const wrapper=inheritSdkDiagnostic(new TurnFailure(report),inheritSdkDiagnostic(new AgentFailure(report.final),error));
+   expect(recordPrivateFailure(root,true,report,wrapper)).toBe(true);
+   expect(read()).toMatchObject({sdk:{text:message}});
+   expect(JSON.stringify(wrapper)).not.toContain(message);expect(failureReply(report)).not.toContain(message);
+   expect(JSON.stringify(read())).not.toMatch(/CAUSE_SECRET|STDERR_SECRET|PROMPT_SECRET|stack|cause/);
+   expect(recordPrivateFailure(root,false,report,wrapper)).toBe(true);
+  });
+  it.each([
+   'failure tel:+123SECRET custom:SECRET data:text/plain,SECRET mailto:person@secret.example urn:secret:SECRET https:secret.example/SECRET',
+   'failure authorization: Basic SECRET',
+   'failure "api-key": "SECRET"',
+   "failure 'password'='SECRET'",
+   'failure api key = SECRET',
+   'failure 用户@secret.公司',
+   'failure cookie: sid=SECRET; session=SECRET',
+   'failure https://secret.example/a?token=SECRET#SECRET ftp://secret.example/file www.secret.example //secret.example/a',
+   'failure authorization=Bearer SECRET auth: SECRET token=SECRET api_key="SECRET VALUE" password=SECRET cookie=SECRET',
+   'failure Bearer SECRET sk-SECRET bf_SECRET ghp_SECRET github_pat_SECRET xoxb-SECRET AKIASECRET eyJSECRET',
+   'failure person@secret.example /Users/person/SECRET C:\\Users\\person\\SECRET \\\\server\\SECRET ~/SECRET /私密/SECRET',
+   'failure "/Users/person/SECRET VALUE"',
+  ])('scrubs sensitive fields: %s', message=>{
+   const row=privateDiagnosticRow(report,capture(message));
+   expect(row).toHaveProperty('sdk.text');expect(JSON.stringify(row)).not.toMatch(/SECRET|secret\.example|person|Users|私密/);
+  });
+  it.each(['Failed to parse item: RAW_LINE_SECRET','CODEX_JSONL_PROXY_BOOTSTRAP_FAILURE: STDERR_SECRET','failure\nPROMPT_SECRET','failure\u2028PROMPT_SECRET','failure {"body":"PROMPT_SECRET"}', 'failure ["PROMPT_SECRET"]','user: PROMPT_SECRET','request body: PROMPT_SECRET','x'.repeat(65537)])('suppresses payload-like text %#',message=>{
+   expect(privateDiagnosticRow(report,capture(message))).not.toHaveProperty('sdk.text');
+  });
+  it.each(['Codex Exec exited with code 1:', 'Codex Exec exited with signal SIGTERM:'])('keeps only exit header %s',header=>{
+   expect(privateDiagnosticRow(report,capture(header+' STDERR_SECRET {"prompt":"SECRET"}\nSECRET'))).toHaveProperty('sdk.text',header);
+  });
+  it('caps Unicode at 1024 UTF-8 bytes without splitting characters',()=>{
+   const row=privateDiagnosticRow(report,capture('错😀'.repeat(1000))) as {sdk:{text:string}};
+   expect(Buffer.byteLength(row.sdk.text)).toBeLessThanOrEqual(1024);expect(Buffer.byteLength(row.sdk.text)).toBeGreaterThan(1017);
+   expect(row.sdk.text).not.toContain('\ufffd');expect(Buffer.from(row.sdk.text).toString('utf8')).toBe(row.sdk.text);
+  });
+ });

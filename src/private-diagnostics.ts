@@ -6,7 +6,7 @@ import { constants as osConstants } from 'node:os';
 import type { FailureReport, FailureSnapshot, FailureStage, FailureCategory } from './agent-failure.js';
 
 export type DiagnosticEvent = 'item.error' | 'turn.failed' | 'error' | 'exception';
-interface SdkContext { detail?: Readonly<SdkDetail>; event: DiagnosticEvent; fingerprint: string; messageBytes: number; fingerprintTruncated: boolean; code?: string; }
+interface SdkContext { text?: string; detail?: Readonly<SdkDetail>; event: DiagnosticEvent; fingerprint: string; messageBytes: number; fingerprintTruncated: boolean; code?: string; }
 const contexts = new WeakMap<Error, SdkContext>();
 const systemCodes = new Set([...getSystemErrorMap().values()].map(([code]) => code));
 const stages: Record<FailureStage, true> = { prepare:true, spawn:true, inference:true, jsonl_parse:true, process_exit:true, delivery:true, history_commit:true, cleanup:true };
@@ -33,7 +33,7 @@ interface SdkDetail {
   resumeFingerprint?: string; threadFingerprint?: string; turnFingerprint?: string;
 }
 export interface SdkDiagnosticOptions {
-  detailed?: boolean; fields?: unknown; eventSubtype?: unknown; run?: SdkDiagnosticRun;
+  detailed?: boolean; text?: boolean; fields?: unknown; eventSubtype?: unknown; run?: SdkDiagnosticRun;
 }
 /** Fixed output vocabulary; matching never copies any part of the input. */
 function textTemplate(message: string): string | undefined {
@@ -99,9 +99,37 @@ function sdkDetail(message: string, options: SdkDiagnosticOptions): Readonly<Sdk
   return Object.freeze(detail);
 }
 
-/** Hash-only compatibility unless the separate detailed switch is explicit.
- * No arbitrary text is retained, even in detailed mode. Diagnostic trouble must
- * never replace an SDK failure or affect recovery decisions. */
+/** Temporary best-effort redaction, not an arbitrary-text secrecy guarantee.
+ * Inspect only the supplied SDK message, never fields, causes or stderr. */
+function sdkErrorText(message: string): string | undefined {
+  // The SDK concatenates stderr after this header. Never retain that suffix,
+  // including when it is on the same line or contains payload-like material.
+  const exit = /^Codex Exec exited with (?:code \d{1,3}|signal SIG[A-Z0-9]+):/.exec(message.slice(0, 80));
+  if (exit) return exit[0];
+  // SDK parse wrappers contain an arbitrary raw JSONL line; bootstrap wrappers
+  // may carry subprocess material. Neither is an SDK error message excerpt.
+  if (/^(?:Failed to parse item:|CODEX_JSONL_PROXY_BOOTSTRAP_FAILURE:)/.test(message)) return;
+  // Reject bodies rather than trying to redact prompts or structured payloads.
+  // A generous inspection ceiling also bounds sanitizer work.
+  if (message.length > 65_536 || /[\r\n\u2028\u2029\x00-\x1f\x7f{}[\]]/.test(message)
+    || /(?:^|\s)(?:system|assistant|user|developer|prompt|history|tool(?: output)?|request body|response body)\s*[:=]|<\/?(?:system|assistant|user|prompt|tool)\b/i.test(message)) return;
+  let text = message
+    .replace(/(?:[a-z][a-z0-9+.-]*:\/\/|[a-z][a-z0-9+.-]+:(?=\S)|www\.|\/\/)[^\s<>"']+/gi, '[redacted]')
+    // Drop the entire remaining line after a credential assignment: headers
+    // and unquoted values can contain spaces, schemes or multiple cookies.
+    .replace(/\b(?:authorization|auth|api[ _-]?key|access[ _-]?token|client[ _-]?secret|[a-z0-9_-]*(?:token|key|password|cookie|secret)[a-z0-9_-]*)["']?\s*[=:].*/gi, '[redacted]')
+    .replace(/\bbearer\s+[^\s,;"']+/gi, '[redacted]')
+    .replace(/\b(?:sk-|bf_|gh[pousr]_|github_pat_|npm_|glpat-|xox[baprs]-|AKIA|ASIA|eyJ)[a-z0-9_.-]+/gi, '[redacted]')
+    .replace(/[^\s<>"'@]+@[^\s<>"'@]+/g, '[redacted]')
+    .replace(/(?:"(?:[a-z]:[\\/]|\/|~\/)[^"]*"|'(?:[a-z]:[\\/]|\/|~\/)[^']*'|(?:[a-z]:[\\/]|\\\\|\/|~\/)[^\s,;<>"']*)/gi, '[redacted]');
+  // Bound in UTF-8 bytes without splitting a code point.
+  let bytes = 0;
+  text = Array.from(text).filter(char => { bytes += Buffer.byteLength(char); return bytes <= 1024; }).join('');
+  return text || undefined;
+}
+
+/** Hash-only compatibility unless the separate switches are explicit.
+ * Diagnostic trouble must never affect recovery decisions. */
 export function rememberSdkFailure(error: Error, event: DiagnosticEvent, message: unknown, options: SdkDiagnosticOptions = {}): void {
   try {
     // Even descriptor reflection can execute a proxy trap and mutate the
@@ -112,9 +140,11 @@ export function rememberSdkFailure(error: Error, event: DiagnosticEvent, message
     if (typeof message !== 'string' || !['item.error','turn.failed','error','exception'].includes(event)) return;
     const bounded = message.slice(0, 8192);
     const code = own(error, 'code');
+    const text = options.detailed === true && options.text === true ? sdkErrorText(message) : undefined;
     contexts.set(error, { event, fingerprint:createHash('sha256').update(bounded).digest('hex'), messageBytes:Buffer.byteLength(message), fingerprintTruncated:message.length > bounded.length,
       ...(typeof code === 'string' && systemCodes.has(code) ? {code} : {}),
-      ...(options.detailed === true ? {detail:sdkDetail(message, options)} : {}) });
+      ...(options.detailed === true ? {detail:sdkDetail(message, options),
+        ...(text !== undefined ? {text} : {})} : {}) });
   } catch { /* Fail closed: no partial record and no change to the actual error. */ }
 }
 

@@ -28,3 +28,13 @@ describe('separate detailed diagnostic configuration',()=>{
  it.each(['true',1,null,[],{}])('rejects invalid detailed value %j',value=>expect(config({privateDiagnosticsDetails:value})).toThrow('privateDiagnosticsDetails must be a boolean'));
  it('validates per-bot detailed values',()=>expect(config({},{privateDiagnosticsDetails:'false'})).toThrow('privateDiagnosticsDetails must be a boolean'));
 });
+
+ describe('temporary text diagnostic configuration',()=>{
+  it('defaults off when both existing flags are set',()=>expect(config({privateDiagnostics:true,privateDiagnosticsDetails:true})().sdk.privateDiagnosticsText).toBeUndefined());
+  it.each([true,false])('inherits and overrides text=%s',value=>{
+   expect(config({privateDiagnosticsText:value})().sdk.privateDiagnosticsText).toBe(value);
+   expect(config({privateDiagnosticsText:value},{privateDiagnosticsText:!value})().sdk.privateDiagnosticsText).toBe(!value);
+  });
+  it.each(['true',1,null,[],{}])('rejects invalid text flag %j',value=>expect(config({privateDiagnosticsText:value})).toThrow('privateDiagnosticsText must be a boolean'));
+  it('validates overrides',()=>expect(config({},{privateDiagnosticsText:1})).toThrow('privateDiagnosticsText must be a boolean'));
+ });
