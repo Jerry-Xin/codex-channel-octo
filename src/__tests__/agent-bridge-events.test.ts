@@ -269,6 +269,7 @@ describe('T25: one canonical options contract', () => {
       diagnosticId?: string;
       assertPublishable?: () => void;
       onExecutionRisk?: (risk: import('../agent-failure.js').ExecutionRisk) => void;
+      privateMemoryContext?: import('../prompt-safety.js').SafeText;
       onManagedExecution?: (execution: import('../execution-scope.js').ManagedExecution) => void;
       interruptedTurn?: import('../turn-context.js').InterruptedTurn;
     }>();

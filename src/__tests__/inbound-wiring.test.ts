@@ -43,7 +43,7 @@ import { GroupContext } from '../group-context.js';
 import { SessionStore } from '../session-store.js';
 import { createAdapter } from '../db-adapter.js';
 import { queryAgent } from '../agent-bridge.js';
-import { getMentionPreference, sendMessage, getGroupMd, getThreadMd } from '../octo/api.js';
+import { registerBot, sendHeartbeat, getMentionPreference, sendMessage, getGroupMd, getThreadMd } from '../octo/api.js';
 import { WKSocket } from '../octo/socket.js';
 import { ChannelType, MessageType, type BotMessage } from '../octo/types.js';
 import { CURRENT_SENDER_ANCHOR } from '../prompt-safety.js';
@@ -60,24 +60,29 @@ function message(overrides: Partial<BotMessage> = {}): BotMessage {
 describe('production socket → gateway → onInbound → router wiring', () => {
   let root: string;
   let stack: BotStack | undefined;
-  let config: Parameters<typeof startBot>[0];
   let emit: (msg: BotMessage) => void;
+  let config: Parameters<typeof startBot>[0];
   const spies: Array<{ mockRestore(): void }> = [];
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    vi.mocked(registerBot).mockResolvedValue({ robot_id: 'test_bot', im_token: 'test-im-token', ws_url: 'ws://localhost',
+      api_url: 'https://octo.example', owner_uid: 'human', owner_channel_id: 'owner-channel' });
     vi.mocked(getGroupMd).mockReset().mockResolvedValue({ content: 'group rules', version: 1 });
     vi.mocked(getThreadMd).mockReset().mockResolvedValue({ content: 'thread rules', version: 1 });
     root = mkdtempSync(join(tmpdir(), 'octo-inbound-wiring-'));
+    mkdirSync(join(root, 'test'));
+    writeFileSync(join(root, 'test', 'MEMORY.md'), 'SYNTHETIC_OWNER_MEMORY');
     mkdirSync(join(root, 'instructions'));
     config = {
-      baseDir: root, maxResponseChars: 524288, dispatchTimeoutMs: 300000,
       botId: 'test', apiUrl: 'https://octo.example', botToken: 'test-token',
+      baseDir: root, privateMemory: { enabled: true },
       cwd: join(root, 'workspace'), dataDir: join(root, 'data'), sdk: {},
       groupConfigDir: join(root, 'instructions'),
       rateLimit: { maxPerMinute: 100 },
       botBlocklist: ['blocked_bot'],
       context: { maxContextChars: 6000, historyLimit: 40 },
+      maxResponseChars: 524288, dispatchTimeoutMs: 300000,
     };
     stack = await startBot(config, true);
     await stack.connect();
@@ -89,8 +94,100 @@ describe('production socket → gateway → onInbound → router wiring', () => 
   afterEach(async () => {
     await stack?.shutdown();
     stack = undefined;
+    vi.useRealTimers();
     for (const spy of spies.splice(0)) spy.mockRestore();
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it('uses the last successful registration on healthy heartbeats and changes scope only after re-registration', async () => {
+    await stack!.shutdown();
+    vi.clearAllMocks();
+    // The real gateway creates its heartbeat interval after fake timers start.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    stack = await startBot(config, true);
+    await stack.connect();
+    emit = vi.mocked(WKSocket).mock.calls[0][0].onMessage!;
+    vi.mocked(queryAgent).mockImplementation(async function* (_prompt, _config, session, _progress, options) {
+      options?.onSessionId?.(`sdk-${session?.sessionKey}`, _prompt);
+      yield 'answer';
+    });
+    const route = vi.spyOn(stack.router, 'routeAndHandle');
+    spies.push(route);
+    const send = async (uid: string, sequence: number) => {
+      emit(message({ from_uid: uid, channel_id: uid, channel_type: ChannelType.DM,
+        message_id: `registration-${sequence}`, message_seq: sequence,
+        payload: { type: MessageType.Text, content: 'hello' } }));
+      await route.mock.results.at(-1)!.value;
+      return vi.mocked(queryAgent).mock.calls.at(-1)!;
+    };
+    const first = await send('human', 1);
+    expect(first[4]?.privateMemoryContext).toContain('SYNTHETIC_OWNER_MEMORY');
+    const privateThread = `sdk-${first[2]?.sessionKey}`;
+    vi.mocked(registerBot).mockResolvedValue({ robot_id: 'test_bot', im_token: 'new-synthetic-token', ws_url: 'ws://localhost',
+      api_url: 'https://octo.example', owner_uid: 'new-owner', owner_channel_id: 'new-owner' });
+    writeFileSync(join(root, 'test', 'MEMORY.md'), 'SYNTHETIC_UPDATED_MEMORY');
+    await vi.advanceTimersByTimeAsync(90000);
+    expect(sendHeartbeat).toHaveBeenCalledTimes(3);
+    expect(registerBot).toHaveBeenCalledTimes(1);
+    // No live revocation is promised: until re-registration A is still cached.
+    const cached = await send('human', 2);
+    expect(cached[4]?.privateMemoryContext).toContain('SYNTHETIC_UPDATED_MEMORY');
+    expect(cached[4]?.resume).toBe(privateThread);
+    const notYetRegistered = await send('new-owner', 3);
+    expect(notYetRegistered[4]?.privateMemoryContext).toBeUndefined();
+
+    vi.mocked(WKSocket).mock.calls[0][0].onError!(Error('Kicked: synthetic registration refresh'));
+    await vi.waitFor(() => expect(WKSocket).toHaveBeenCalledTimes(2));
+    expect(registerBot).toHaveBeenCalledTimes(2);
+    emit = vi.mocked(WKSocket).mock.calls[1][0].onMessage!;
+    const revoked = await send('human', 4);
+    expect(revoked[4]?.privateMemoryContext).toBeUndefined();
+    expect(revoked[4]?.resume).toBeUndefined();
+    expect(revoked[2]?.sessionKey).not.toBe(first[2]?.sessionKey);
+    const registered = await send('new-owner', 5);
+    expect(registered[4]?.privateMemoryContext).toContain('SYNTHETIC_UPDATED_MEMORY');
+    expect(registered[4]?.resume).toBeUndefined();
+    expect(registered[2]?.sessionKey).not.toBe(notYetRegistered[2]?.sessionKey);
+    expect(registered[4]?.resume).not.toBe(privateThread);
+  });
+
+  it.each([ChannelType.Group, ChannelType.CommunityTopic, ChannelType.DM])('excludes memory from non-owner channel %s', async (channel_type) => {
+    vi.mocked(queryAgent).mockImplementation(async function* () { yield 'answer'; });
+    vi.mocked(getMentionPreference).mockResolvedValue(true);
+    const route = vi.spyOn(stack!.router, 'routeAndHandle');
+    spies.push(route);
+    emit(message({ from_uid: 'stranger', channel_type, channel_id: channel_type === ChannelType.Group ? 'group' : 'group____topic',
+      payload: { type: MessageType.Text, content: 'hello', mention: { uids: ['test_bot'] } } }));
+    await route.mock.results[0].value;
+    expect(queryAgent).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(queryAgent).mock.calls[0][4]?.privateMemoryContext).toBeUndefined();
+    expect(vi.mocked(queryAgent).mock.calls[0][0]).not.toContain('SYNTHETIC_OWNER_MEMORY');
+  });
+
+  it('retains the note across an actual bot-stack shutdown/restart and /reset', async () => {
+    vi.mocked(queryAgent).mockImplementation(async function* (_prompt, _config, _session, _progress, options) {
+      options?.onSessionId?.('stored-private-thread', _prompt);
+      yield 'answer';
+    });
+    const send = async (content: string, sequence: number) => {
+      const route = vi.spyOn(stack!.router, 'routeAndHandle');
+      emit(message({ message_id: `restart-${sequence}`, message_seq: sequence,
+        channel_id: 'human', channel_type: ChannelType.DM, payload: { type: MessageType.Text, content } }));
+      await route.mock.results[0].value;
+      route.mockRestore();
+    };
+    await send('remember', 1);
+    await stack!.shutdown();
+    stack = await startBot(config, true);
+    await stack.connect();
+    emit = vi.mocked(WKSocket).mock.calls.at(-1)![0].onMessage!;
+    await send('recall after restart', 2);
+    expect(vi.mocked(queryAgent).mock.calls.at(-1)![4]?.privateMemoryContext).toContain('SYNTHETIC_OWNER_MEMORY');
+    expect(vi.mocked(queryAgent).mock.calls.at(-1)![4]?.resume).toBe('stored-private-thread');
+    await send('/reset', 3);
+    await send('recall after reset', 4);
+    expect(vi.mocked(queryAgent).mock.calls.at(-1)![4]?.resume).toBeUndefined();
+    expect(vi.mocked(queryAgent).mock.calls.at(-1)![4]?.privateMemoryContext).toContain('SYNTHETIC_OWNER_MEMORY');
   });
 
   it.each(['new task','继续上个任务'])('dispatches %s after a failed runner stops, with interruption context and no replay', async content => {
@@ -125,10 +222,11 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     const store=new SessionStore(createAdapter(join(root,'data','cc-octo.db')));store.init();
     spies.push({mockRestore:()=>store.close()});
     const snapshot=store.getInterruption('human');expect(snapshot).toMatchObject({reason:'failed',executionRisk:'unknown',stage:'inference'});
-    store.setSdkSessionId('human','old-sdk-thread');
+    const scopedKey=vi.mocked(queryAgent).mock.calls[0][2]!.sessionKey;
+    store.setSdkSessionId(scopedKey,'old-sdk-thread');
     emit({...inbound,message_id:'command',message_seq:2,payload:{type:MessageType.Text,content:command}});await route.mock.results[1].value;
     expect(queryAgent).toHaveBeenCalledTimes(1);expect(store.getInterruption('human')).toEqual(snapshot);
-    if(command==='/reset')expect(store.getSdkSessionId('human')).toBeUndefined();
+    if(command==='/reset')expect(store.getSdkSessionId(scopedKey)).toBeUndefined();
     vi.mocked(queryAgent).mockImplementationOnce(async function* (_m,_c,_s,_t,options){expect(options?.interruptedTurn).toEqual(snapshot);yield 'following response';});
     emit({...inbound,message_id:'next',message_seq:3,payload:{type:MessageType.Text,content:'new task'}});await route.mock.results[2].value;
     expect(queryAgent).toHaveBeenCalledTimes(2);expect(store.getInterruption('human')).toBeUndefined();

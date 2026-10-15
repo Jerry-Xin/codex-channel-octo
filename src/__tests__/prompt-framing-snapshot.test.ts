@@ -1,9 +1,9 @@
 /**
  * T26 — prompt framing snapshot. The strings passed to `runStreamed` for the
  * initial, stream-recovery and stale-resume fresh-retry attempts must stay
- * byte-identical to the pre-output-selection bridge. The digests below were
- * recorded from the baseline bridge (upstream main c66504e, after sender-context framing) with this same
- * script; any edit to the framing changes them.
+ * stable with the merged sender/document/private-memory security prefix. The
+ * digests include private-memory background guidance even when no snapshot is
+ * supplied; any edit to the shared framing changes them.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -67,12 +67,12 @@ async function drain(opts?: Parameters<typeof queryAgent>[4]): Promise<void> {
   for await (const t of queryAgent('USER BODY', cfg(), undefined, undefined, opts)) void t;
 }
 
-describe('T26: framing remains byte-identical to main on a successful run', () => {
+describe('T26: framing keeps sender and private-memory guidance on a successful run', () => {
  it('keeps the sender block and current-message anchor in the initial prompt',async()=>{
   scriptedRuns=[async function*(){yield {type:'turn.completed',usage:{}};}];
   await drain();expect(prompts).toHaveLength(1);
   expect(prompts[0].endsWith('\n\n---\n\n[Current message — respond to this ONLY]\nUSER BODY')).toBe(true);
-  expect(sha(prompts[0])).toBe('b01540d157ba507fd228df1d6e34106bb6a1d3684056f7e4b69d77729544dbae');
+  expect(sha(prompts[0])).toBe('57331a39a9978e6c2bc5e4de7ac1465f4d1bf4914c30c3a50c9833e1b82e2488');
  });
  it('never emits fallback or continuation prompts when execution is uncertain',async()=>{
   scriptedRuns=[async function*(){throw new Error(interrupt);}];

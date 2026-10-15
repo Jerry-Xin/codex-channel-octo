@@ -123,8 +123,8 @@ export class SessionRouter {
     return this.conversationMarkdown.get(channelId, channelType);
   }
 
-  prepareConversationMd(channelId: string, channelType: ChannelType, threadId?: string): Promise<ConversationTurnContext> {
-    return this.conversationMarkdown.prepareTurn(channelId, channelType, threadId);
+  prepareConversationMd(channelId: string, channelType: ChannelType, threadId?: string, storageSessionKey = channelId): Promise<ConversationTurnContext> {
+    return this.conversationMarkdown.prepareTurn(channelId, channelType, threadId, storageSessionKey);
   }
 
   /**

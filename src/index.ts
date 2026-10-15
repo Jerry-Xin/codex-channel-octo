@@ -42,6 +42,7 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
+import { canLoadPrivateMemory, loadPrivateMemory, privateMemorySessionKey } from './private-memory.js';
 import { buildSenderContext } from './sender-context.js';
 import { isConversationMdEvent } from './conversation-md.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
@@ -271,7 +272,7 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
       // authored as this bot must reach the router to invalidate its cache.
       if (msg.from_uid === gateway.botId && msg.payload.event?.type !== 'mention_pref_updated'
         && !isConversationMdEvent(msg.payload.event?.type)) return;
-      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
+      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, () => gateway.ownerUid)
         .catch((err) => {
           console.error(`[codex-channel-octo] ${label}Unhandled message handler error:`, summarizeAgentError(err));
         })
@@ -330,6 +331,7 @@ export async function handleMessage(
   groupContext: GroupContext,
   streamRelay: StreamRelay,
   botId: string,
+  currentOwner: () => string = () => '',
 ): Promise<void> {
   const channelId = msg.channel_id ?? '';
   const channelType = msg.channel_type ?? ChannelType.DM;
@@ -341,6 +343,12 @@ export async function handleMessage(
   let wasProcessed = false;
   const routeResult = await router.routeAndHandle(msg, async (result, turn) => {
     wasProcessed = true;
+    // Last successful registration snapshot. Ownership transfers require a
+    // restart/re-registration; the gateway does not poll ownership on heartbeat.
+    const ownerUid = currentOwner();
+    const eligibleForMemory = canLoadPrivateMemory(config, msg, ownerUid);
+    const sessionKey = config.privateMemory?.enabled === true
+      ? privateMemorySessionKey(result.sessionKey, eligibleForMemory) : result.sessionKey;
     const turnStore = turn.guard(store);
     const turnGroupContext = turn.guard(groupContext);
     const sendMessage = (params: Parameters<typeof import('./octo/api.js').sendMessage>[0]) => {
@@ -350,7 +358,6 @@ export async function handleMessage(
     };
     let stage: FailureStage = 'prepare';
     let modelAttempts = 0;
-    const { sessionKey } = result;
 
     try {
       // --- Session ---
@@ -683,7 +690,7 @@ export async function handleMessage(
       // only when there is no history. Later turns carry only the delta. The
       // cursor was already advanced above, so dropping the delta here does not
       // strand messages — history covers them and they must not be re-shown.
-      const serverMd = isGroup ? await router.prepareConversationMd(channelId, channelType, resume) : undefined;
+      const serverMd = isGroup ? await router.prepareConversationMd(channelId, channelType, resume, sessionKey) : undefined;
       const injectedContext = firstTurnHistory ? firstTurnHistory : groupContextBlock;
       const userContentForLLM = assembleUserMessage(
         injectedContext,
@@ -762,6 +769,9 @@ export async function handleMessage(
         }
       }
 
+      if (eligibleForMemory) {
+        sessionOpts = { ...(sessionOpts ?? {}), privateMemoryContext: loadPrivateMemory(config, msg, ownerUid) };
+      }
       stage = 'inference'; turn.stage = stage;
       const agentEvents = queryAgentEvents(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);
 

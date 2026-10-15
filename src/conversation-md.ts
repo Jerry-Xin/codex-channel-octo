@@ -55,12 +55,14 @@ export class ConversationMarkdown {
     return snapshot?.empty ? undefined : snapshot?.context;
   }
 
-  async prepareTurn(channelId: string, channelType: ChannelType, threadId?: string): Promise<ConversationTurnContext> {
+  async prepareTurn(channelId: string, channelType: ChannelType, threadId?: string, storageSessionKey = channelId): Promise<ConversationTurnContext> {
+    // Fetch by Octo channel, but bind injection state to the actual SDK session
+    // namespace so persisted deduplication and withdrawals survive restarts.
     const snapshot = await this.snapshot(channelId, channelType);
     if (!snapshot) return { context: '', retryContext: '', commit: () => {} };
-    let previous = this.injected.get(channelId);
+    let previous = this.injected.get(storageSessionKey);
     if (this.persistence && threadId) {
-      const signature = this.persistence.getConversationDocumentSignature(channelId, threadId);
+      const signature = this.persistence.getConversationDocumentSignature(storageSessionKey, threadId);
       previous = signature === null ? undefined : { threadId, signature: signature ?? 'unknown-legacy-injection' };
     }
     if (snapshot.empty && (!threadId || previous?.threadId !== threadId)) {
@@ -71,11 +73,11 @@ export class ConversationMarkdown {
       context: unchanged ? '' : snapshot.context, retryContext: snapshot.empty ? '' : snapshot.context,
       commit: (threadId) => {
         if (this.persistence) {
-          this.persistence.setConversationDocumentSignature(channelId, threadId, snapshot.signature);
+          this.persistence.setConversationDocumentSignature(storageSessionKey, threadId, snapshot.signature);
           return;
         }
-        this.injected.delete(channelId);
-        this.injected.set(channelId, { threadId, signature: snapshot.signature });
+        this.injected.delete(storageSessionKey);
+        this.injected.set(storageSessionKey, { threadId, signature: snapshot.signature });
         if (this.injected.size > MAX_CACHE_ENTRIES) this.injected.delete(this.injected.keys().next().value!);
       },
     };

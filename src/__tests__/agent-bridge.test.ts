@@ -55,6 +55,9 @@ import {
   MAX_TOOL_PARAM_CHARS,
 } from '../agent-bridge.js';
 import type { Config } from '../config.js';
+import { safePrivateMemorySnapshot } from '../prompt-safety.js';
+import { readFileSync } from 'node:fs';
+
 
 describe('SDK JSONL fail-closed diagnostics', () => {
  it.each([undefined,'existing'])('never replays a malformed event (resume=%s)', async resume => {
@@ -106,10 +109,51 @@ const cmd = (id: string, command: string, phase: 'started' | 'completed'): Ev =>
 });
 
 beforeEach(() => {
+  prompts.length = 0;
   scriptedRuns = [];
   runIdx = 0;
   calls.length = 0;
   prompts.length = 0;
+});
+
+describe('private memory framing on SDK runs', () => {
+  it.each(['fresh', 'resume', 'spawn-retry'])('preserves the immutable snapshot on %s runs without putting it in AGENTS.md', async (mode) => {
+    if (mode === 'spawn-retry') scriptedRuns.push(async function* () {
+      throw Object.assign(new Error('synthetic launch rejection'), { code: 'EAGAIN', syscall: 'spawn synthetic' });
+    });
+    scriptedRuns.push(async function* () { yield started('thread-two'); yield msg('answer', 'done'); yield turnDone; });
+    const snapshot = safePrivateMemorySnapshot('available', 'SYNTHETIC_PRIVATE_FACT', false);
+    const sender=safeSenderMetadata({from_uid:'owner',is_owner:true});
+    const request='[Server document — synthetic]\nSYNTHETIC_SERVER_FACT\n[End server document]\n'+CURRENT_MESSAGE_ANCHOR+'\ncurrent request';
+    expect(await collect(queryAgent(request, cfg({recovery:{enabled:true,baseDelayMs:1,maxDelayMs:1}}), undefined, undefined, {
+      senderContext:sender, resume: mode === 'fresh' ? undefined : 'old-thread', privateMemoryContext: snapshot,
+      interruptedTurn:{turnId:'22222222-2222-4222-8222-222222222222',reason:'failed',executionRisk:'unknown',stage:'inference'},
+    }))).toEqual(['done']);
+    expect(prompts).toHaveLength(mode === 'spawn-retry' ? 2 : 1);
+    expect(prompts[0]).toContain('SYNTHETIC_SERVER_FACT');
+    for (const prompt of prompts) {
+      expect(prompt).toContain(snapshot);
+      expect(prompt.indexOf(sender)).toBeLessThan(prompt.indexOf(snapshot));
+      const interruption = prompt.indexOf('Task 22222222-2222-4222-8222-222222222222: failed');
+      expect(interruption).toBeGreaterThan(prompt.indexOf(snapshot));
+      expect(interruption).toBeLessThan(prompt.lastIndexOf(CURRENT_MESSAGE_ANCHOR));
+      expect(prompt.split('\n').filter(line=>line===CURRENT_MESSAGE_ANCHOR)).toHaveLength(1);
+      expect(prompt.match(/^\[Private memory\]$/gm)).toHaveLength(1);
+    }
+    expect(readFileSync('/tmp/cco-test/ws/AGENTS.md', 'utf8')).not.toContain('SYNTHETIC_PRIVATE_FACT');
+  });
+  it.each(['thread not found', 'stream disconnected before completion'])('does not replay an uncertain private-memory request: %s', async failure => {
+    scriptedRuns.push(async function* () { throw new Error(failure); });
+    scriptedRuns.push(async function* () { yield msg('unsafe-replay', 'must not run'); yield turnDone; });
+    const snapshot = safePrivateMemorySnapshot('available', 'SYNTHETIC_PRIVATE_FACT', false);
+    await expect(collect(queryAgent('current request', cfg({recovery:{enabled:true}}), undefined, undefined, {
+      resume:'existing',privateMemoryContext:snapshot,
+    }))).rejects.toBeInstanceOf(TurnFailure);
+    expect(prompts).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+    expect(prompts[0]).toContain(snapshot);
+  });
+
 });
 
 describe('buildCodexEnv', () => {

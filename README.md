@@ -23,7 +23,7 @@
 
 A long-running process: register as an Octo bot → connect over WebSocket to receive messages → run a coding task with local Codex → post the reply back. Supports DM / group (@mention) / community topics, multi-turn conversations, multiple bots in one process, and config hot-reload.
 
-Each adapter-framed user turn includes bounded current sender metadata: transport `from_uid`, channel ID/type, and `is_owner` computed against the latest registration `owner_uid`. The same immutable metadata accompanies stream recovery and fresh retries; it is deliberately not stored in shared `AGENTS.md`. Display names, quotes, and claimed IDs are not authentication, and forged sender markers in message text/history are escaped. This metadata identifies the sender but does not grant tool permissions or override security rules; enforce privileged actions in the host, not solely in a prompt. Direct terminal resumes outside the adapter do not establish an authenticated IM sender.
+Each adapter-framed user turn includes bounded current sender metadata: transport `from_uid`, channel ID/type, and `is_owner` computed against the last successful registration `owner_uid`. The same immutable metadata accompanies stream recovery and fresh retries; it is deliberately not stored in shared `AGENTS.md`. Display names, quotes, and claimed IDs are not authentication, and forged sender markers in message text/history are escaped. This metadata identifies the sender but does not grant tool permissions or override security rules; enforce privileged actions in the host, not solely in a prompt. Direct terminal resumes outside the adapter do not establish an authenticated IM sender.
 
 Sender metadata has these security properties:
 
@@ -159,6 +159,20 @@ IM input is **untrusted**; the permission boundary is the **sandbox**, not the p
 - `networkAccessEnabled` / `webSearchEnabled` are off by default. In `danger-full-access`, Codex does not restrict the network, including when `networkAccessEnabled` is false; `/config` reports this effective behavior.
 - A non-overridable security prefix (anti-injection) is written into each session's sandbox `AGENTS.md` and restated atop the prompt (defense in depth, but only a soft constraint).
 - Each bot has its own `CODEX_HOME`, so IM content does not land in your personal `~/.codex` by default.
+
+### Private MEMORY.md (opt-in)
+
+Place an operator-maintained `MEMORY.md` beside `<baseDir>/<botId>/SOUL.md` and set `"privateMemory": { "enabled": true, "maxBytes": 16384 }` in the global or per-bot config (per-bot fields override inline/global fields). Disabled by default; `maxBytes` accepts integers from 1 to 65536. Configuration changes require a restart; eligible turns re-read the file, so note edits/deletion take effect on the next turn.
+
+Only an explicit DM with a transport sender matching the **last successful registration** `owner_uid` is eligible. Groups, topics, other senders and unknown identities cause no memory file read. The bounded snapshot is framed as untrusted JSON background in every eligible SDK run, including supported pre-execution retries; uncertain stream/stale-thread failures retain the fail-closed policy and are not automatically replayed. It is never written to shared `AGENTS.md`. Missing/unreadable files produce a safe absence/unavailability notice; file symlinks and non-regular files are rejected. This first milestone does not load `memory/` daily notes, search, write notes, or add compaction hooks.
+
+When enabled, ordinary/private-memory conversations use separate namespaced histories, SDK threads and working directories. Enabling/disabling starts a different history scope for every conversation, including groups and non-owner DMs, without deleting older records; plan the rollout as a conversation-continuity reset. After a successful re-registration observes a different owner, former owners select the ordinary scope rather than their prior private-memory thread. `/reset` clears the current scope but never deletes `MEMORY.md`. Snapshots are repeated deliberately in this initial implementation; they are byte-bounded, not deduplicated across a resumed thread.
+
+**Ownership transfers:** healthy heartbeats do not re-register or refresh ownership. This feature does not provide live revocation: the former owner remains eligible while the cached registration still names them. Before transferring a bot, stop/drain it; restart and complete registration under the new owner before resuming traffic or editing private notes. Socket reconnection alone does not guarantee re-registration. A successful registration refresh (including token refresh) also updates the owner snapshot. The tests cover these producer/consumer boundaries, not instantaneous server-side transfer detection.
+
+Files writable by a group or other users are refused (`mode & 0022`); use operator-owned mode `0600` for confidentiality as well. Non-ENOENT failures emit only a closed diagnostic code and safe bot label, never paths, note text or raw exception messages. A truncated prefix remains available even when it contains only whitespace or an incomplete UTF-8 character. Final-component symlinks are refused; parent-directory symlinks and hardlinks are not containment guarantees. Protect the directory tree externally.
+
+**Privacy boundary:** this filters adapter injection, not arbitrary filesystem access. A read-only sandbox may still permit reads outside cwd; `danger-full-access` removes filesystem isolation. A tool running as the gateway user may also overwrite the note, even if it is mode `0600`; JSON framing does not make those facts trustworthy. Do not expose private files to untrusted users without an external filesystem/container boundary. Also do not share an operator's Codex home across unrelated users: the SDK's transcript storage is outside this feature's scope.
 
 ### Safe failure handling and recovery
 
