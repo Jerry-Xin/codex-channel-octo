@@ -94,6 +94,21 @@ describe.skipIf(process.platform === 'win32')('real SDK and proxy notification h
     expect(await scopes[0].waitForStopped(4000)).toBe(true);
   });
 
+  it.each([false, true].flatMap(managed =>
+    ['silent-stream', 'silent-item', 'work-silent', 'blank-completed', 'erased-completed'].map(mode => ({ mode, managed })),
+  ))('rejects silent completion without replay ($mode, managed=$managed)', async ({ mode, managed }) => {
+    let failure: unknown;
+    try { await collect(mode, managed); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(TurnFailure);
+    const report = (failure as TurnFailure).report;
+    expect(report).toMatchObject({ attempts: 1, decision: 'blocked_uncertain',
+      executionRisk: mode === 'work-silent' ? 'effects_observed' : 'unknown' });
+    if (mode.startsWith('silent-') || mode === 'work-silent') expect(report.final.category).toBe('auth');
+    expect(privateDiagnosticRow(report, failure)).toMatchObject({ sdk: { event: mode === 'silent-item' ? 'item.error' : 'error' } });
+    expect(records().filter(value => value === 'launched')).toHaveLength(1);
+    expect(records()).toContain('completed');
+  });
+
   it.each(['cancel', 'deadline'] as const)('stops a waiting owned process on %s without replay', async reason => {
     const controller = new AbortController();
     const run = collect('wait', true, controller.signal);

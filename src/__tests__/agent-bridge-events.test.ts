@@ -245,6 +245,75 @@ describe('intermediate CLI notifications', () => {
       message: 'Falling back from WebSockets to HTTPS transport. Synthetic interruption',
     });
 
+  it.each(['stream', 'item'].flatMap(kind =>
+    ['absent', 'empty', 'spaces', 'formatting', 'erased', 'mixed-phases'].map(output => ({ kind, output })),
+  ))('rejects a silent completed turn ($kind, $output) without an attempt_end', async ({ kind, output }) => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield item('work', 'file_change', 'completed', { changes: [] });
+      if (kind === 'stream') yield { type: 'error', message: 'authentication failed' };
+      else yield item('error', 'error', 'completed', { message: 'authentication failed' });
+      if (output === 'erased') yield msg('answer', 'discarded snapshot', {}, 'updated');
+      if (output === 'mixed-phases') yield msg('commentary', 'still working', { phase: 'commentary' });
+      if (output !== 'absent') yield msg('answer', (output === 'spaces' || output === 'mixed-phases') ? '  \n' : output === 'formatting' ? '\u200b\u2060' : '');
+      yield turnDone;
+    }];
+    const seen: AgentOutputEvent[] = [];
+    await expect((async () => {
+      for await (const event of queryAgentEvents('hi', cfg())) seen.push(event);
+    })()).rejects.toMatchObject({ report: { attempts: 1, decision: 'blocked_uncertain',
+      executionRisk: 'effects_observed', final: { category: 'auth' } } });
+    expect(seen.some(event => event.kind === 'attempt_end')).toBe(false);
+    expect(runIdx).toBe(1);
+  });
+
+  it.each(['stream', 'item'].flatMap(kind => [
+    ['authentication failed', 'auth'], ['quota exhausted', 'quota_exhausted'],
+    ['context window exceeded', 'context_limit'], ['invalid encrypted content', 'invalid_encrypted_content'],
+    ['permission denied', 'permission'], ['unrecognized synthetic error', 'unknown'],
+  ].map(([message, category]) => ({ kind, message, category }))))('retains $category on silent $kind completion', async ({ kind, message, category }) => {
+    scriptedRuns = [async function* () {
+      if (kind === 'stream') yield { type: 'error', message };
+      else yield item('error', 'error', 'completed', { message });
+      yield turnDone;
+    }];
+    await expect(events()).rejects.toMatchObject({ report: { attempts: 1, decision: 'blocked_uncertain', final: { category } } });
+    expect(runIdx).toBe(1);
+  });
+
+  it('keeps an earlier genuine failure when a later reconnect notice precedes silent completion', async () => {
+    scriptedRuns = [async function* () {
+      yield item('error', 'error', 'completed', { message: 'authentication failed' });
+      yield notification('stream'); yield turnDone;
+    }];
+    await expect(events()).rejects.toMatchObject({ report: { final: { category: 'auth' }, attempts: 1 } });
+  });
+
+  it('uses the configured output selection rules for compatibility whitespace replies', async () => {
+    scriptedRuns = [async function* () { yield notification('stream'); yield msg('answer', '  '); yield turnDone; }];
+    const config = cfg(); config.sdk.outputSelection = 'legacy';
+    const seen: AgentOutputEvent[] = [];
+    for await (const event of queryAgentEvents('hi', config)) seen.push(event);
+    expect(seen.at(-1)).toMatchObject({ kind: 'attempt_end', terminal: 'completed' });
+  });
+
+  it('logs one fixed deferred marker and a bounded recovery count without SDK text', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      scriptedRuns = [async function* () {
+        yield { type: 'error', message: 'SYNTHETIC_PRIVATE_ERROR' };
+        yield { type: 'error', message: 'SYNTHETIC_PRIVATE_ERROR_AGAIN' };
+        yield msg('answer', 'answer'); yield turnDone;
+      }];
+      await events();
+      expect(warn.mock.calls).toEqual([
+        ['[codex-channel-octo] CLI notification deferred'],
+        ['[codex-channel-octo] CLI notifications recovered', JSON.stringify({ count: 2 })],
+      ]);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('SYNTHETIC_PRIVATE');
+    } finally { warn.mockRestore(); }
+  });
+
   it.each(['stream', 'item'] as const)('continues the same execution after a %s notification and snapshot revision', async kind => {
     let drained = false;
     scriptedRuns = [async function* () {
