@@ -8,6 +8,7 @@
     "src/__tests__/api-diagnostics.test.ts",
     "src/__tests__/session-recovery.test.ts",
     "src/__tests__/agent-bridge-events.test.ts",
+    "src/__tests__/recoverable-notifications.test.ts",
     "src/__tests__/output-selection.test.ts"
   ],
   "exclude": [

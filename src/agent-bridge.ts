@@ -504,6 +504,11 @@ export async function* queryAgentEvents(
 
     let reportedSessionId = false;
     let completed = false;
+    // CLI JSONL drops app-server's will_retry flag. A stream error or warning
+    // item can precede a successful terminal event in the SAME execution.
+    // Retain one bounded diagnostic until the terminal state is known rather
+    // than closing the SDK iterator (which terminates its subprocess).
+    let pendingFailure: AgentFailure | undefined;
     // Latest text per agent_message id, for the post-drain side-effect mark.
     const latestText = new Map<string, string>();
     // First-sight seq per item id of THIS run. Codex (0.142) emits each agent
@@ -572,18 +577,15 @@ export async function* queryAgentEvents(
           } else if (item.type === 'error') {
             const itemMsg = item.message ?? 'codex item error';
             // Codex reports metadata fallback and a resumed session's model
-            // change as error items, then continues the turn. Drain only these
-            // known notices; genuine tool/model failures must still throw.
+            // change as error items, then continues the turn. Keep their safe
+            // progress notice; other warnings also wait for the turn outcome.
             const modelChanged = /^This session was recorded with model `([^`\r\n]+)` but is resuming with `[^`\r\n]+`\. Consider switching back to `\1` as it may affect Codex performance\.$/.test(itemMsg);
             if (modelChanged || /^Model metadata for `[^`\r\n]+` not found\. Defaulting to fallback metadata(?:[.;]|$)/i.test(itemMsg)) {
               console.warn('[codex-channel-octo] non-fatal codex model notice');
             } else {
-              // A genuine failed tool/model step reported AS an item (distinct
-              // from the stream-level 'error' event). Surface it as a thrown
-              // error so the turn doesn't silently produce zero output (which
-              // would look like "no response") and so stale-resume detection can
-              // run. Any side effect already seen suppresses retry.
-              throw sdkFailure(itemMsg, 'item.error');
+              const failure = sdkFailure(itemMsg, 'item.error');
+              if (completed) throw failure;
+              pendingFailure = failure;
             }
           } else if (
             (item.type === 'reasoning' || item.type === 'todo_list') &&
@@ -602,18 +604,32 @@ export async function* queryAgentEvents(
         case 'turn.completed':
           // usage available on ev.usage — left for observability.
           completed = true;
+          pendingFailure = undefined;
           break;
         case 'turn.failed':
           throw sdkFailure(ev.error?.message ?? '', 'turn.failed');
-        case 'error':
-          throw sdkFailure(ev.message ?? '', 'error');
+        case 'error': {
+          const failure = sdkFailure(ev.message ?? '', 'error');
+          if (completed) throw failure;
+          pendingFailure = failure;
+          break;
+        }
       }
+    }
+
+    // Neither an exhausted iterator nor partial text proves success. A pending
+    // notification provides the original diagnostic if the CLI never finishes;
+    // a real turn.failed or process/parse exception already propagates above.
+    if (!completed) {
+      throw pendingFailure ?? new AgentFailure({
+        stage: 'inference', category: 'stream_interrupted', source: 'local', evidence: 'structured',
+      });
     }
 
     // The run drained. Mark side-effect-seen once it produced text so a
     // post-output failure is never fresh-retried.
     if ([...latestText.values()].some((t) => t)) sideEffect.seen = true;
-    yield { kind: 'attempt_end', attempt, terminal: completed ? 'completed' : 'no_terminal' };
+    yield { kind: 'attempt_end', attempt, terminal: 'completed' };
   }
 
   let risk: ExecutionRisk = 'proven_not_started';

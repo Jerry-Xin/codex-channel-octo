@@ -195,15 +195,21 @@ describe('message events', () => {
 });
 
 describe('attempt markers', () => {
-  it('T5: a stream without turn.completed ends with terminal no_terminal', async () => {
+  it('T5: EOF without turn.completed fails without an attempt_end', async () => {
     scriptedRuns = [async function* () {
       yield started('t1');
       yield msg('item_0', 'partial');
       yield item('item_1', 'command_execution', 'started', { command: 'sleep 60' });
     }];
-    const evs = await events();
+    const evs: AgentOutputEvent[] = [];
+    await expect((async () => {
+      for await (const event of queryAgentEvents('hi', cfg())) evs.push(event);
+    })()).rejects.toMatchObject({ report: {
+      attempts: 1, executionRisk: 'effects_observed',
+      final: { category: 'stream_interrupted', source: 'local' },
+    } });
     expect(evs[0]).toEqual({ kind: 'attempt_start', attempt: 0, reason: 'initial', continues: null });
-    expect(evs.at(-1)).toEqual({ kind: 'attempt_end', attempt: 0, terminal: 'no_terminal' });
+    expect(evs.some(event => event.kind === 'attempt_end')).toBe(false);
   });
 
   it.each([{message:interrupt,resume:undefined,partial:false},{message:staleErr,resume:'old',partial:false},{message:interrupt,resume:'old',partial:true},{message:staleErr,resume:'old',partial:true}])('has no recovery attempt/end after $message (partial=$partial)',async({message,resume,partial})=>{
@@ -230,6 +236,115 @@ describe('attempt markers', () => {
   });
 
 
+});
+
+describe('intermediate CLI notifications', () => {
+  const notification = (kind: 'stream' | 'item'): Ev => kind === 'stream'
+    ? { type: 'error', message: 'Reconnecting... 2/5 (synthetic transport interruption)' }
+    : item('warning', 'error', 'completed', {
+      message: 'Falling back from WebSockets to HTTPS transport. Synthetic interruption',
+    });
+
+  it.each(['stream', 'item'] as const)('continues the same execution after a %s notification and snapshot revision', async kind => {
+    let drained = false;
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield msg('answer', 'early text', {}, 'updated');
+      yield item('work', 'command_execution', 'started', { command: 'synthetic' });
+      yield notification(kind);
+      yield notification(kind);
+      yield msg('answer', 'completed answer');
+      yield turnDone;
+      drained = true;
+    }];
+    const text = [];
+    for await (const part of queryAgent('hi', cfg(), undefined, undefined, { resume: 'existing-thread' })) text.push(part);
+    expect(text).toEqual(['completed answer']);
+    expect(drained).toBe(true);
+    expect(runIdx).toBe(1);
+  });
+
+  it.each(['stream', 'item'] as const)('uses a later turn.failed instead of the earlier %s notification', async kind => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield notification(kind);
+      yield msg('answer', 'must not be published');
+      yield item('work', 'file_change', 'completed', { changes: [] });
+      yield { type: 'turn.failed', error: { message: 'authentication failed' } };
+    }];
+    const seen: AgentOutputEvent[] = [];
+    await expect((async () => {
+      for await (const event of queryAgentEvents('hi', cfg(), undefined, undefined)) seen.push(event);
+    })()).rejects.toMatchObject({ report: {
+      attempts: 1, decision: 'blocked_uncertain', executionRisk: 'effects_observed',
+      final: { source: 'sdk_event', category: 'auth' },
+    } });
+    expect(seen.some(event => event.kind === 'attempt_end')).toBe(false);
+    expect(runIdx).toBe(1);
+  });
+
+  it.each(['stream', 'item', 'none'] as const)('rejects partial output followed by EOF (%s notification)', async kind => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      if (kind !== 'none') yield notification(kind);
+      yield msg('answer', 'must not be published');
+    }];
+    const published: string[] = [];
+    await expect((async () => {
+      for await (const text of queryAgent('hi', cfg())) published.push(text);
+    })()).rejects.toBeInstanceOf(TurnFailure);
+    expect(published).toEqual([]);
+    expect(runIdx).toBe(1);
+  });
+
+  it.each(['stream', 'item'] as const)('preserves a process exception after a %s notification', async kind => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield notification(kind);
+      yield turnDone;
+      throw new Error('Codex Exec exited with code 1: SYNTHETIC_PRIVATE_STDERR');
+    }];
+    await expect(events()).rejects.toMatchObject({ report: {
+      attempts: 1, final: { stage: 'process_exit', category: 'process_exit' },
+    } });
+    expect(runIdx).toBe(1);
+  });
+
+  it.each(['stream', 'item'] as const)('does not hide a %s error arriving after turn.completed', async kind => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield msg('answer', 'must not be published');
+      yield turnDone;
+      yield notification(kind);
+    }];
+    await expect(events()).rejects.toBeInstanceOf(TurnFailure);
+    expect(runIdx).toBe(1);
+  });
+
+  it('still rejects a terminal failure following turn.completed', async () => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield turnDone;
+      yield { type: 'turn.failed', error: { message: 'permission denied' } };
+    }];
+    await expect(events()).rejects.toMatchObject({ report: { final: { category: 'permission' } } });
+  });
+
+  it('retains cancellation and closes the iterator while a notification is pending', async () => {
+    const controller = new AbortController();
+    let closed = false;
+    scriptedRuns = [async function* () {
+      try {
+        yield started('thread');
+        yield notification('stream');
+        controller.abort();
+        controller.signal.throwIfAborted();
+      } finally { closed = true; }
+    }];
+    await expect(events({ signal: controller.signal })).rejects.toMatchObject({ report: { decision: 'cancelled' } });
+    expect(closed).toBe(true);
+    expect(runIdx).toBe(1);
+  });
 });
 
 describe('T14: queryAgent wrapper keeps baseline string output', () => {
