@@ -1,8 +1,11 @@
+import { fileURLToPath } from 'node:url';
+import { TurnFailure } from '../agent-failure.js';
 /**
  * agent-bridge typed-event tests (queryAgentEvents) — mocked @openai/codex-sdk.
  * Covers work identity / first-sight seq, message phase and revisions, attempt
  * markers across recovery and fresh retry, and the canonical options contract.
  */
+import { OutputCollector, DEFAULT_OUTPUT_SELECTION_MODE } from '../output-selection.js';
 import { describe, it, expect, expectTypeOf, vi, beforeEach } from 'vitest';
 
 type Ev = Record<string, unknown>;
@@ -31,9 +34,17 @@ vi.mock('@openai/codex-sdk', () => ({
   },
 }));
 
+vi.mock('../execution-scope.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../execution-scope.js')>();
+  return {...original, ExecutionScope: class extends original.ExecutionScope {
+    constructor() { super(fileURLToPath(new URL('./fixtures/owned-cli.mjs', import.meta.url))); }
+  }};
+});
+
 import { queryAgent, queryAgentEvents } from '../agent-bridge.js';
 import type { AgentOutputEvent, QueryAgentOptions } from '../agent-bridge.js';
 import type { Config } from '../config.js';
+import type { ManagedExecution } from '../execution-scope.js';
 
 function cfg(): Config {
   return {
@@ -73,6 +84,17 @@ const staleErr = 'thread not found';
 beforeEach(() => {
   runIdx = 0;
   scriptedRuns = [];
+});
+
+it('retains positive non-execution proof for an earlier spawn retry scope',async()=>{
+  scriptedRuns=[async function*(){throw Object.assign(new Error('synthetic'),{code:'EAGAIN',syscall:'spawn proxy'});},async function*(){yield started('thread');yield {type:'turn.failed',error:{message:'synthetic failure'}};}];
+  const config=cfg();config.sdk.recovery={enabled:true,baseDelayMs:1,maxDelayMs:1};const scopes:ManagedExecution[]=[];
+  try{
+    await expect((async()=>{for await(const event of queryAgentEvents('current request',config,undefined,undefined,{onManagedExecution:scope=>{scopes.push(scope);}}))void event;})()).rejects.toMatchObject({report:{first:{stage:'spawn'},attempts:2}});
+    expect(scopes).toHaveLength(2);expect(runIdx).toBe(2);
+    expect(await scopes[0].waitForStopped(0)).toBe(true);
+    expect(await scopes[1].waitForStopped(0)).toBe(false); // Mocked SDK launches no gateway-owned process.
+  }finally{scopes.forEach(scope=>scope.dispose());}
 });
 
 describe('work events', () => {
@@ -148,10 +170,11 @@ describe('message events', () => {
       yield msg('item_1', 'b', { phase: 'commentary' });
       yield msg('item_2', 'c', { phase: 'final_answer' });
       yield msg('item_3', 'd', { phase: 'something_else' });
+      yield msg('item_4', 'e', { phase: 'partial_answer' });
       yield turnDone;
     }];
     const phases = (await events()).filter((e) => e.kind === 'message').map((e) => (e as { phase: string }).phase);
-    expect(phases).toEqual(['unknown', 'commentary', 'final_answer', 'unknown']);
+    expect(phases).toEqual(['unknown', 'commentary', 'final_answer', 'unknown', 'partial_answer']);
   });
 
   it('T2: a snapshot of the same item keeps its first-sight seq', async () => {
@@ -183,69 +206,15 @@ describe('attempt markers', () => {
     expect(evs.at(-1)).toEqual({ kind: 'attempt_end', attempt: 0, terminal: 'no_terminal' });
   });
 
-  it('T7: stream interrupt → recovery attempt continues the interrupted one; seq stays monotonic', async () => {
-    scriptedRuns = [
-      async function* () {
-        yield started('t1');
-        yield msg('item_0', 'lost');
-        throw new Error(interrupt);
-      },
-      async function* () {
-        yield started('t1');
-        yield msg('item_0', 'kept');
-        yield turnDone;
-      },
-    ];
-    const evs = await events();
-    expect(evs).toEqual([
-      { kind: 'attempt_start', attempt: 0, reason: 'initial', continues: null },
-      { kind: 'message', attempt: 0, itemId: 'item_0', seq: 0, text: 'lost', phase: 'unknown' },
-      { kind: 'attempt_start', attempt: 1, reason: 'stream_recovery', continues: 0 },
-      { kind: 'message', attempt: 1, itemId: 'item_0', seq: 1, text: 'kept', phase: 'unknown' },
-      { kind: 'attempt_end', attempt: 1, terminal: 'completed' },
-    ]);
-  });
+  it.each([{message:interrupt,resume:undefined,partial:false},{message:staleErr,resume:'old',partial:false},{message:interrupt,resume:'old',partial:true},{message:staleErr,resume:'old',partial:true}])('has no recovery attempt/end after $message (partial=$partial)',async({message,resume,partial})=>{
+ scriptedRuns=[async function*(){yield started('t');if(partial)yield msg('before','partial');throw new Error(message);}];const seen:AgentOutputEvent[]=[];
+ await expect((async()=>{for await(const e of queryAgentEvents('hi',cfg(),undefined,undefined,{resume}))seen.push(e);})()).rejects.toMatchObject({report:{attempts:1,decision:'blocked_uncertain'}});
+ expect(seen.map(e=>e.kind)).toEqual(partial?['attempt_start','message']:['attempt_start']);expect(runIdx).toBe(1);
+ });
 
-  it('T8: stale resume → fresh_retry with continues null (stale attempt not in lineage)', async () => {
-    scriptedRuns = [
-      async function* () {
-        yield msg('item_0', 'stale text');
-        throw new Error(staleErr);
-      },
-      async function* () {
-        yield started('t2');
-        yield msg('item_0', 'fresh');
-        yield turnDone;
-      },
-    ];
-    const evs = await events({ resume: 'old', fallbackRetryPrompt: 'with history', onResumeFailed: () => {} });
-    expect(evs.filter((e) => e.kind === 'attempt_start')).toEqual([
-      { kind: 'attempt_start', attempt: 0, reason: 'initial', continues: null },
-      { kind: 'attempt_start', attempt: 1, reason: 'fresh_retry', continues: null },
-    ]);
-  });
 
-  it('T7d: stale → fresh retry → stream recovery continues the fresh attempt', async () => {
-    scriptedRuns = [
-      async function* () {
-        throw new Error(staleErr);
-      },
-      async function* () {
-        yield started('t2');
-        throw new Error(interrupt);
-      },
-      async function* () {
-        yield started('t2');
-        yield turnDone;
-      },
-    ];
-    const evs = await events({ resume: 'old', onResumeFailed: () => {} });
-    expect(evs.filter((e) => e.kind === 'attempt_start')).toEqual([
-      { kind: 'attempt_start', attempt: 0, reason: 'initial', continues: null },
-      { kind: 'attempt_start', attempt: 1, reason: 'fresh_retry', continues: null },
-      { kind: 'attempt_start', attempt: 2, reason: 'stream_recovery', continues: 1 },
-    ]);
-  });
+
+
 
   it('T6: an error after partial output propagates (no attempt_end)', async () => {
     scriptedRuns = [async function* () {
@@ -256,36 +225,16 @@ describe('attempt markers', () => {
     const seen: AgentOutputEvent[] = [];
     await expect((async () => {
       for await (const ev of queryAgentEvents('hi', cfg())) seen.push(ev);
-    })()).rejects.toThrow('boom');
+    })()).rejects.toBeInstanceOf(TurnFailure);
     expect(seen.some((e) => e.kind === 'attempt_end')).toBe(false);
   });
 
-  it('a message observed mid-run does not block a stale-resume fresh retry (baseline gating)', async () => {
-    scriptedRuns = [
-      async function* () {
-        yield msg('item_0', 'early');
-        throw new Error(staleErr);
-      },
-      async function* () {
-        yield started('t2');
-        yield msg('item_0', 'fresh');
-        yield turnDone;
-      },
-    ];
-    const out: string[] = [];
-    for await (const t of queryAgent('hi', cfg(), undefined, undefined, { resume: 'old', onResumeFailed: () => {} })) out.push(t);
-    expect(out).toEqual(['fresh']);
-  });
+
 });
 
 describe('T14: queryAgent wrapper keeps baseline string output', () => {
   it('yields only the completed run, first-seen order, non-empty, snapshot-overwritten', async () => {
     scriptedRuns = [
-      async function* () {
-        yield started('t1');
-        yield msg('item_0', 'lost');
-        throw new Error(interrupt);
-      },
       async function* () {
         yield started('t1');
         yield msg('item_0', 'a1', {}, 'updated');
@@ -308,42 +257,60 @@ describe('T25: one canonical options contract', () => {
     expectTypeOf<Parameters<typeof queryAgent>>().toEqualTypeOf<Parameters<typeof queryAgentEvents>>();
   });
 
-  it('preserves every existing option field', () => {
+  it('exposes only supported query options', () => {
+    expectTypeOf<Extract<keyof QueryAgentOptions, 'onResumeFailed' | 'fallbackRetryPrompt'>>().toEqualTypeOf<never>();
     expectTypeOf<QueryAgentOptions>().toEqualTypeOf<{
       resume?: string;
       onSessionId?: (id: string, prompt: string) => void;
       groupInstructions?: string;
-      onResumeFailed?: () => void;
-      fallbackRetryPrompt?: string;
+      senderContext?: import('../prompt-safety.js').SafeText;
+      signal?: AbortSignal;
+      deadline?: number;
+      diagnosticId?: string;
+      assertPublishable?: () => void;
+      onExecutionRisk?: (risk: import('../agent-failure.js').ExecutionRisk) => void;
+      privateMemoryContext?: import('../prompt-safety.js').SafeText;
+      onManagedExecution?: (execution: import('../execution-scope.js').ManagedExecution) => void;
+      interruptedTurn?: import('../turn-context.js').InterruptedTurn;
     }>();
   });
 
-  it('options flow through the wrapper (onSessionId, onResumeFailed)', async () => {
-    scriptedRuns = [
-      async function* () {
-        throw new Error(staleErr);
-      },
-      async function* () {
-        yield started('t-new');
-        yield msg('item_0', 'ok');
-        yield turnDone;
-      },
-    ];
-    const ids: string[] = [];
-    const reportedPrompts: string[] = [];
-    let cleared = 0;
-    const out: string[] = [];
-    for await (const t of queryAgent('hi', cfg(), undefined, undefined, {
-      resume: 'old',
-      fallbackRetryPrompt: 'fresh document context',
-      onSessionId: (id, prompt) => { ids.push(id); reportedPrompts.push(prompt); },
-      onResumeFailed: () => cleared++,
-    })) out.push(t);
-    expect(out).toEqual(['ok']);
-    expect(ids).toEqual(['t-new']);
-    expect(reportedPrompts).toHaveLength(1);
-    expect(reportedPrompts[0]).toContain('fresh document context');
-    expect(reportedPrompts[0]).not.toContain('\n\nhi');
-    expect(cleared).toBe(1);
+  it('onSessionId observes the current attempt without a replay callback',async()=>{
+ const session=vi.fn();scriptedRuns=[async function*(){yield started('t');yield turnDone;}];
+ await events({resume:'t',onSessionId:session});expect(session).toHaveBeenCalledWith('t',expect.stringContaining('hi'));
+ });
+});
+
+// The real bridge sees SDK-style id/type/text items with no phase property.
+describe('unlabeled SDK events through default output selection', () => {
+  it.each([false, true])('excludes progress (tool boundary=%s)', async withTool => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield msg('progress', 'I will inspect the code. '.repeat(500));
+      if (withTool) yield item('tool', 'command_execution', 'completed', { command: 'true' });
+      yield msg('answer', 'The fix is complete.');
+      yield turnDone;
+    }];
+    const collector = new OutputCollector();
+    const observed = await events();
+    for (const event of observed) collector.push(event);
+    expect(observed.filter(e => e.kind === 'message').map(e => e.phase)).toEqual(['unknown', 'unknown']);
+    expect(collector.select({ mode: DEFAULT_OUTPUT_SELECTION_MODE, maxChars: 1000 }))
+      .toMatchObject({ text: 'The fix is complete.', source: 'last_message', droppedMessageCount: 1 });
+  });
+
+  it('normalizes an agent_message started without text at the real bridge boundary', async () => {
+    scriptedRuns = [async function* () {
+      yield started('thread');
+      yield msg('answer', 'Useful answer');
+      yield { type: 'item.started', item: { id: 'unfinished', type: 'agent_message' } };
+      yield turnDone;
+    }];
+    const observed = await events();
+    expect(observed.find(e => e.kind === 'message' && e.itemId === 'unfinished'))
+      .toMatchObject({ text: '' });
+    const collector = new OutputCollector();
+    observed.forEach(event => collector.push(event));
+    expect(collector.select({ mode: DEFAULT_OUTPUT_SELECTION_MODE, maxChars: 1000 }).text).toBe('Useful answer');
   });
 });
