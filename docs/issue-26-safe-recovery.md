@@ -6,7 +6,7 @@ Implementation baseline: main b381706. The original analysis is in issue #26 and
 
 - Diagnostics use closed stage/category/source/evidence snapshots and a local diagnostic ID. Terminal reports retain first/final failure, attempt count, decision and execution risk. Raw prompts, JSONL records, tool output, subprocess stderr and exception causes are not serialized.
 - SDK event text is classified only through tested, anchored patterns. A plain exit code 1 is not a transient error. Rejected JSONL and subprocess stderr are never searched for retry directives. Unknown formats remain unknown.
-- A single recovery scheduler bounds attempts, cancellable equal-jitter backoff (half-to-full exponential delay) and elapsed time. It honors a trusted Retry-After minimum without truncating it into an early retry. Current SDK versions do not expose provider headers: the adapter does not invent them or claim it can count CLI-internal network retries.
+- A single recovery scheduler bounds attempts, cancellable equal-jitter backoff (half-to-full exponential delay) and elapsed time. The delay helper can honor a trusted Retry-After floor, but this is defensive support: no current SDK recovery producer supplies it. Octo REST Retry-After is diagnostic-only and does not schedule model retries. Current SDK versions do not expose provider headers: the adapter does not invent them or claim it can count CLI-internal network retries.
 - New retries default off. With retries on, only a positively established pre-execution temporary failure is eligible in the current runtime (e.g. EAGAIN/EMFILE/ENFILE from OS spawn). A missing thread ID, missing tool event, read-only filesystem sandbox or same-thread continuation does not establish safe execution. SDK HTTP-shaped errors improve diagnostics but cannot establish that tools did not execute.
 - Consequently old automatic stream continuation and stale-thread fresh replay are intentionally disabled for uncertain runs, even when new retries are off. Existing thread mappings are retained for operator reconciliation rather than silently cleared. Unused stale-replay callbacks and their per-turn fallback prompt assembly have been removed. This is a safety behavior change, not a claim of complete legacy retry compatibility.
 - Timeout revokes publication and propagates AbortSignal to the SDK, relay and network sends. The existing JSONL proxy forwards termination and escalates an uncooperative direct child. External commands, detached children or remote writes may outlive cancellation: the session remains quarantined instead of claiming termination or exactly-once execution.
@@ -69,9 +69,11 @@ For a third-party DM or a group the owner cannot join, send this from the owner'
 
 A non-owner pause notice includes the session key and turn ID to give to the owner. Explicit targets are allowed only from an authenticated owner DM; omitting the target always refers to the current conversation. The session and turn ID must both match. Active rows and retained live local handlers are refused with distinct explanations. Whitespace between arguments is flexible; session keys are exact, whitespace-free transport identifiers.
 
-Privileged authorization accepts the exact registration `owner_uid`, or its single scoped alias explicitly named in the server registration `owner_channel_id` (a compound channel must also include this bot's endpoint). No alias is inferred from an incoming UID or channel. The gateway refreshes both bindings on registration/token refresh. If the server supplies no usable scoped binding, a prefixed UID fails closed; it must not be authorized by suffix similarity. Prompt `is_owner` metadata is advisory and is not this privileged gate.
+Privileged authorization requires exact equality with the validated registration owner_uid. The current server assigns both owner_uid and owner_channel_id from robot.CreatorUID: owner_channel_id is not a compound DM channel and supplies no trusted namespace. The synthetic alias-binding branch is removed. A registration UID that itself contains a prefix works by exact equality; a differently rewritten wire UID does not.
 
-The command passes transport, mention and sender/session rate limits before quarantine. Paused-session messages do not consume or block on the shared global model-request budget; per-sender/session budgets still bound notice traffic. Unauthenticated commands on healthy sessions receive no reply and are excluded from model context. The command runs inside the source session queue; the target live-handler/state checks and exact SQLite update run synchronously without nested cross-session locks. It does not create a new model turn. It verifies the exact session/turn pair and rejects a retained local handler; database state is authoritative so an offline release cannot be shadowed by an old memory cache. Group commands must mention the bot unless server policy permits no-mention replies. This acknowledgement releases admission for new messages only: it does not replay, resend, mark old output delivered, or reconcile external systems itself.
+If transport rewrites the owner's UID, online reconciliation is unavailable with this API. Startup warns about this limit; pause/refusal notices direct users to the offline operator procedure below. That procedure requires gateway downtime. No incoming suffix is treated as proof of identity, and no server identity mapping is invented. Prompt is_owner remains legacy advisory attribution rather than control authorization; that deliberate distinction is documented in sender-context.ts.
+
+The command passes transport, mention and sender/session rate limits before quarantine. Persisted quarantined traffic has a separate aggregate bucket (10 × maxPerMinute capacity/refill) plus normal sender/session limits. It cannot consume healthy model admission or admit unlimited distinct senders. Active rows use the normal global budget. Unauthenticated commands on healthy sessions receive no reply and are excluded from model context. Each recognized release/refusal is audited with actor/session SHA-256 hashes, a validated task ID when available, and a closed outcome. Raw identities, session keys and command text are withheld. Exact target/turn is checked before revealing active/handler state. The command runs inside the source session queue; the target live-handler/state checks and exact SQLite update run synchronously without nested cross-session locks. It does not create a new model turn. It verifies the exact session/turn pair and rejects a retained local handler; database state is authoritative so an offline release cannot be shadowed by an old memory cache. Group commands must mention the bot unless server policy permits no-mention replies. This acknowledgement releases admission for new messages only: it does not replay, resend, mark old output delivered, or reconcile external systems itself.
 
 The offline helper remains available for operator maintenance. Stop the gateway first and use the matching identifiers:
 
@@ -114,25 +116,33 @@ callbacks that cannot run. `AgentOutputEvent.reason` is narrowed to `initial` an
 `request_retry`. Current producers always emit `continues: null`; the collector
 keeps legacy lineage handling defensively, not as an enabled recovery mechanism.
 
-## Latest review verification
+## Current review follow-up
 
-The owner-control change is tested against real SQLite/router state for unbound
-prefixes, the single registration-bound prefix, binding refresh, explicit
-third-party DM recovery, exact session/turn matching, retained handlers, active
-rows and paused traffic's global-rate isolation. Retention tests preserve paused
-output/parts past seven days and expire them normally after release. Structured
-API tests deny raw bodies/causes while retaining endpoint/status/read/parse facts.
-The server's pinned [BotSendMessageReq](https://github.com/Mininglamp-OSS/octo-server/blob/32ffcff4539736d833a0e61e1ef2e31e83b51a74/modules/bot_api/send.go)
-was independently inspected: it has no client_msg_no field, so the correlation
-UUID must not be called a remote dedup key.
+Review #5521938058 and addendum #6174915906 are addressed using the explicitly
+fail-closed maintenance option: exact registered identity online, truthful
+startup/pause warnings and offline maintenance for rewritten owner UIDs. The
+actual register source sets owner_channel_id == owner_uid; synthetic compound
+register fixtures are not used to claim alias support.
 
-SDK 0.142.3 and 0.162.1 each passed 76 files / 1602 tests serially; production
-type-check, zero-warning lint and build passed. Strict checking of the new API,
-recovery and modified bridge/selection contract tests reports zero diagnostics.
-Five negative controls (restore suffix-only auth, ignore explicit targets,
-charge paused traffic globally, expire unresolved evidence, and classify all
-POSTs as delivery) all fail the corresponding new regressions, then pass after
-restoration. An unrelated filesystem-watcher timing failure in a parallel run
-passed isolated and in both serial full runs; its implementation was not changed.
-This follow-up does not deploy the bot, rerun uncertain tasks, automatically
-resend messages or establish termination of remote/detached effects.
+Paused group chatter remains in the bounded context cache. Control, oversized,
+rate-limited and shutdown-rejected traffic remains excluded. Real handler tests
+use the SQLite ledger and assert durable quarantine after inference failure,
+clean state after preparation failure, and refusal to invoke the model again.
+Conversation document warnings read structured HTTP status; reset uses the
+turn-guarded store. API request timeouts remain 30 seconds. Timeout wording
+checks the deadline, including synchronous deadline observation before a timer.
+Generation numbers are diagnostic; actual fencing uses revoked publication and
+an exact current turn_id predicate.
+
+CI now runs npm run type-check:recovery-tests for recovery/API and bridge/selection
+contract tests, alongside production types. Historical tests outside this strict
+subset remain runtime-tested; the change does not claim otherwise.
+
+Current follow-up validation: SDK 0.142.3 and 0.162.1 each pass 76 files / 1609
+serial tests. Production types, the CI recovery-test type target, lint, build
+and package checks pass. Four negative controls are rejected: disabling the
+production quarantine predicate, dropping paused chatter, reverting structured
+HTTP status to message parsing, and removing the paused aggregate cap. The
+register implementation was directly inspected: both API paths assign OwnerUID
+and OwnerChannelID from robot.CreatorUID. This is source verification, not a
+live transport fault-injection or remote-effect termination guarantee.

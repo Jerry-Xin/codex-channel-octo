@@ -63,7 +63,7 @@ function setupMocks() {
     ws_url: 'wss://ws.test/v1',
     api_url: 'https://api.test',
     owner_uid: 'owner-1',
-    owner_channel_id: 'owner-ch',
+    owner_channel_id: 'owner-1',
   });
   vi.mocked(sendHeartbeat).mockResolvedValue(undefined as never);
 }
@@ -295,8 +295,8 @@ describe('Token refresh cooldown', () => {
 
     vi.mocked(registerBot).mockResolvedValueOnce({
       robot_id: 'bot-123', im_token: 'refreshed-token', ws_url: 'wss://ws.test/v1',
-      api_url: 'https://test.example.com', owner_uid: 'owner-1',
-      owner_channel_id: 'sNEW_owner-1@sNEW_bot-123',
+      api_url: 'https://test.example.com', owner_uid: 'owner-2',
+      owner_channel_id: 'owner-2',
     });
     // Simulate WS error that triggers refresh
     const socketOpts = vi.mocked(WKSocket).mock.calls[0][0];
@@ -306,7 +306,7 @@ describe('Token refresh cooldown', () => {
     await vi.advanceTimersByTimeAsync(100);
     const afterFirstRefresh = vi.mocked(registerBot).mock.calls.length;
     expect(afterFirstRefresh).toBe(initialCallCount + 1);
-    expect(gw.ownerChannelId).toBe('sNEW_owner-1@sNEW_bot-123');
+    expect(gw.ownerUid).toBe('owner-2');
 
     // Try another refresh within cooldown
     socketOpts.onError!(new Error('Kicked by server'));
@@ -449,7 +449,6 @@ describe('Two-phase startup: register() then connect()', () => {
     await gw.register();
     expect(gw.botId).toBe('bot-123');
     expect(gw.ownerUid).toBe('owner-1');
-    expect(gw.ownerChannelId).toBe('owner-ch');
     // No socket constructed yet — the WS only opens in connect().
     expect(vi.mocked(WKSocket)).not.toHaveBeenCalled();
     await gw.stop();

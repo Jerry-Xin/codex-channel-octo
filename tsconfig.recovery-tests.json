@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "src/__tests__/api-diagnostics.test.ts",
+    "src/__tests__/session-recovery.test.ts",
+    "src/__tests__/agent-bridge-events.test.ts",
+    "src/__tests__/output-selection.test.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "coverage"
+  ]
+}

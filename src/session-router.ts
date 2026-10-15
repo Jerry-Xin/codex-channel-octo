@@ -3,7 +3,9 @@
  */
 
 import { isOwnerSender } from './sender-context.js';
-import { diagnosticId } from './agent-failure.js';
+import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
+import { AgentFailure, diagnosticId } from './agent-failure.js';
 import { TurnContext, type TurnLedger } from './turn-context.js';
 import type { Config } from './config.js';
 import type { BotMessage, MentionEntity } from './octo/types.js';
@@ -36,7 +38,7 @@ export interface RouteResult {
    * so the type doesn't suggest a wider contract than the code provides.
    * Add more reasons here when corresponding emit sites land.
    */
-  rejectionReason?: 'rate_limited' | 'oversized' | 'quarantined' | 'control';
+  rejectionReason?: 'rate_limited' | 'oversized' | 'quarantined' | 'control' | 'stopping';
 }
 
 interface TokenBucket {
@@ -64,6 +66,7 @@ export class SessionRouter {
   /** G20: per-user buckets keyed by from_uid alone (cross-channel rate limit). */
   private readonly userBuckets = new Map<string, TokenBucket>();
   private globalBucket: TokenBucket | null = null;
+  private pausedGlobalBucket: TokenBucket | null = null;
   /**
    * G14: UIDs known to be bots. Initialized with this bot's robotId; can be
    * extended via registerKnownBot() for future multi-bot deployments.
@@ -78,7 +81,7 @@ export class SessionRouter {
   private readonly ledger?: TurnLedger;
   private readonly conversationMarkdown: ConversationMarkdown;
 
-  constructor(config: Config, robotId: string, ownerUid: string | (() => string) = '', documentStore?: import('./conversation-md.js').ConversationDocumentStore, private readonly ownerChannelId: string | (() => string) = '') {
+  constructor(config: Config, robotId: string, ownerUid: string | (() => string) = '', documentStore?: import('./conversation-md.js').ConversationDocumentStore) {
     if (documentStore && 'beginTurn' in documentStore) this.ledger = documentStore as typeof documentStore & TurnLedger;
     this.config = config;
     this.robotId = robotId;
@@ -165,10 +168,10 @@ export class SessionRouter {
   ): Promise<RouteResult | null> {
     const key = this.sessionKey(msg);
     return this.withSessionLock(key, async () => {
-      if (this.stopping) return null;
+      if (this.stopping) return { sessionKey: key, shouldProcess: false, message: msg, rejectionReason: 'stopping' };
       const result = await this.processMessage(msg, key, true);
       if (!result || !result.shouldProcess) return result;
-      if (this.stopping) return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
+      if (this.stopping) return { ...result, shouldProcess:false, rejectionReason:'stopping' };
       // Control commands pass transport/mention and session/user rate gates but do not
       // enter the model or begin a new execution generation.
       if (await this.handleReconciliation(result)) {
@@ -190,7 +193,8 @@ export class SessionRouter {
         return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
       }
       if (result && result.shouldProcess) {
-        await this.runHandlerWithTimeout(result, handler);
+        const admitted = await this.runHandlerWithTimeout(result, handler);
+        if (!admitted) return { ...result, shouldProcess: false, rejectionReason: 'stopping' };
       }
       return result;
     });
@@ -208,8 +212,8 @@ export class SessionRouter {
     if (timer) clearTimeout(timer);
   }
 
-  private async runHandlerWithTimeout(result: RouteResult, handler: (result: RouteResult, turn: TurnContext) => Promise<void>): Promise<void> {
-    if (this.stopping) return;
+  private async runHandlerWithTimeout(result: RouteResult, handler: (result: RouteResult, turn: TurnContext) => Promise<void>): Promise<boolean> {
+    if (this.stopping) return false;
     const id = diagnosticId();
     const generation = this.ledger?.beginTurn(result.sessionKey, id) ?? 1;
     const turn = new TurnContext(this.config.dispatchTimeoutMs, generation, id);
@@ -240,7 +244,7 @@ export class SessionRouter {
         timeout = setTimeout(() => { timedOut = true; turn.cancel(); resolve(); }, this.config.dispatchTimeoutMs);
       }));
       await Promise.race(waits);
-      if (timedOut && !this.stopping) {
+      if ((timedOut || performance.now() >= turn.deadline) && !this.stopping) {
         this.finishCancelledTurn(result.sessionKey, turn);
         await this.replySafe(result.message, turn.executionRisk === 'proven_not_started' ? `⚠️ 任务超时，模型执行未启动；可以发送新任务。编号 ${turn.turnId}` : this.pauseNotice(result.message, result.sessionKey, turn.turnId));
       } else if (turn.signal.aborted && !this.stopping) {
@@ -248,6 +252,7 @@ export class SessionRouter {
         await this.replySafe(result.message, turn.executionRisk === 'proven_not_started' ? `⚠️ 任务已取消，模型执行未启动；可以发送新任务。编号 ${turn.turnId}` : this.pauseNotice(result.message, result.sessionKey, turn.turnId));
       }
     } finally { if (timeout) clearTimeout(timeout); turn.signal.removeEventListener('abort',onAbort); }
+    return true;
   }
 
   private finishCancelledTurn(session: string, turn: TurnContext): void {
@@ -257,14 +262,22 @@ export class SessionRouter {
   }
 
   private isControlOwner(msg: BotMessage): boolean {
-    const channel = typeof this.ownerChannelId === 'function' ? this.ownerChannelId() : this.ownerChannelId;
-    return isOwnerSender(msg, this.getOwnerUid(), channel, this.robotId);
+    return isOwnerSender(msg, this.getOwnerUid());
+  }
+
+  private auditReconciliation(msg: BotMessage, target: string, turnId: string | undefined,
+    outcome: 'unauthorized' | 'invalid_command' | 'dm_required' | 'turn_mismatch' | 'handler_running' | 'active' | 'released' | 'store_failed'): void {
+    // Linkable locally, without raw private session/actor identifiers or command text.
+    const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+    console.info('[codex-channel-octo] reconciliation', JSON.stringify({
+      actorHash: digest(msg.from_uid), targetHash: digest(target), turnId, outcome,
+    }));
   }
 
   private pauseNotice(msg: BotMessage, key: string, turnId: string): string {
     const prefix = `⚠️ 上次任务的执行状态尚未确认，本会话暂停新任务。编号 ${turnId}。`;
     if (this.isControlOwner(msg)) return `${prefix}核对外部结果后发送 /reconcile ${turnId} --external-results-verified 恢复；不会重跑旧任务。`;
-    return `${prefix}请将编号交给注册主人；主人可在与机器人的私聊中发送 /reconcile ${turnId} --session ${key} --external-results-verified。不会重跑旧任务。`;
+    return `${prefix}请将编号和会话标识 ${key} 交给维护者。只有来信 UID 与注册 owner_uid 完全一致的主人可在本人私聊中发送 /reconcile ${turnId} --session ${key} --external-results-verified；若通道改写主人 UID，则必须由维护者停止网关后使用离线恢复流程，本频道无法授权解除。不会重跑旧任务。`;
   }
 
   /** Registration-bound control path; never invokes a model or resets history. */
@@ -275,18 +288,21 @@ export class SessionRouter {
     if (!/^\/reconcile(?:\s|$)/i.test(body)) return false;
     if (!this.isControlOwner(msg)) {
       // Silent on healthy sessions; mark control so commands never enter history.
+      this.auditReconciliation(msg, key, undefined, 'unauthorized');
       if (this.ledger?.isTurnQuarantined(key) || this.quarantined.has(key)) {
-        await this.replySafe(msg, '仅注册主人可以核对并恢复本会话，请将任务编号交给主人。');
+        await this.replySafe(msg, '此来信 UID 无法与注册 owner_uid 精确核验；如通道改写 UID，请由维护者停止网关并按离线恢复流程处理。');
       }
       return true;
     }
     const match = /^\/reconcile\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\s+--session\s+([^\s\x00-\x1f\x7f]{1,512}))?\s+--external-results-verified$/i.exec(body);
     if (!match) {
+      this.auditReconciliation(msg, key, undefined, 'invalid_command');
       await this.replySafe(msg, '核对外部结果后发送 /reconcile <任务编号> [--session <会话标识>] --external-results-verified；指定其他会话时请从本人私聊发送。');
       return true;
     }
     const target = match[2] ?? key;
     if (match[2] && msg.channel_type !== ChannelType.DM) {
+      this.auditReconciliation(msg, target, match[1].toLowerCase(), 'dm_required');
       await this.replySafe(msg, '请从与机器人的本人私聊中指定目标会话。');
       return true;
     }
@@ -295,15 +311,30 @@ export class SessionRouter {
     // commands could deadlock); active rows and retained handlers fail closed.
     let reply: string;
     const id = match[1].toLowerCase();
-    if ([...this.turns.values()].includes(target)) {
-      reply = '原任务仍在停止处理中，暂时不能恢复，请稍后再试。';
-    } else if (this.ledger?.getTurnState(target) === 'active') {
-      reply = '目标任务仍标记为运行中，不能解除隔离；请联系维护者核对运行状态，任务编号不一定有误。';
-    } else {
-      const released = this.ledger ? this.ledger.reconcileTurn(target, id) : this.quarantined.get(target) === id;
-      if (released) { this.quarantined.delete(target); this.quarantineNotices.delete(target); }
-      reply = released ? '✓ 目标会话已恢复，没有重跑旧任务。可以发送新消息。' : '任务编号与目标会话的暂停记录不匹配，请检查编号和会话标识。';
+    let outcome: 'turn_mismatch' | 'handler_running' | 'active' | 'released';
+    try {
+      const currentId = this.ledger ? this.ledger.getQuarantinedTurnId(target) : this.quarantined.get(target);
+      // Do not disclose third-party runtime state for a guessed key/wrong ID.
+      if (currentId !== id) {
+        outcome = 'turn_mismatch';
+        reply = '任务编号与目标会话的暂停记录不匹配，请检查编号和会话标识。';
+      } else if ([...this.turns.values()].includes(target)) {
+        outcome = 'handler_running';
+        reply = '原任务仍在停止处理中，暂时不能恢复，请稍后再试。';
+      } else if (this.ledger?.getTurnState(target) === 'active') {
+        outcome = 'active';
+        reply = '目标任务仍标记为运行中，不能解除隔离；请联系维护者核对运行状态，任务编号不一定有误。';
+      } else {
+        const released = this.ledger ? this.ledger.reconcileTurn(target, id) : this.quarantined.get(target) === id;
+        if (released) { this.quarantined.delete(target); this.quarantineNotices.delete(target); }
+        outcome = released ? 'released' : 'turn_mismatch';
+        reply = released ? '✓ 目标会话已恢复，没有重跑旧任务。可以发送新消息。' : '任务编号与目标会话的暂停记录不匹配，请检查编号和会话标识。';
+      }
+    } catch {
+      this.auditReconciliation(msg, target, id, 'store_failed');
+      throw new AgentFailure({ stage: 'prepare', category: 'history_failed', source: 'local', evidence: 'structured' });
     }
+    this.auditReconciliation(msg, target, id, outcome);
     await this.replySafe(msg, reply);
     return true;
   }
@@ -513,7 +544,7 @@ export class SessionRouter {
     // user spam. Without this a fire that lands while the owner's bucket is
     // exhausted would be silently dropped while its nextRun has already advanced.
     if (!this.isCronFire(msg)) {
-      const blocker = this.checkAllRateLimits(key, msg.from_uid, quarantineAware && (this.ledger?.isTurnQuarantined(key) ?? this.quarantined.has(key)));
+      const blocker = this.checkAllRateLimits(key, msg.from_uid, quarantineAware && (this.ledger ? this.ledger.getTurnState(key) === 'quarantined' : this.quarantined.has(key)));
       if (blocker) {
         if (!blocker.notified) {
           blocker.notified = true;
@@ -591,14 +622,14 @@ export class SessionRouter {
    * blocked by per-user limit doesn't get spammed when their per-session
    * bucket still has tokens.
    */
-  private checkAllRateLimits(key: string, uid: string, skipGlobal = false): TokenBucket | null {
+  private checkAllRateLimits(key: string, uid: string, paused = false): TokenBucket | null {
     this.cleanStaleBuckets();
 
     const now = Date.now();
     const maxPerMinute = this.config.rateLimit.maxPerMinute;
     const globalMax = maxPerMinute * GLOBAL_RATE_MULTIPLIER;
 
-    const globalBucket = this.getOrCreateGlobalBucket(now, globalMax);
+    const globalBucket = this.getOrCreateGlobalBucket(now, globalMax, paused);
     // Per-participant session bucket: key by session AND uid. For a group the
     // sessionKey is the channel_id (shared), so keying the rate bucket by
     // sessionKey alone would collapse the WHOLE room into one maxPerMinute quota
@@ -618,16 +649,16 @@ export class SessionRouter {
     // Check in priority order: global → per-user → per-session.
     // Per-user before per-session so a user blocked across groups gets a
     // consistent debounce target instead of one per session bucket.
-    if (!skipGlobal && globalBucket.tokens < 1) return globalBucket;
+    if (globalBucket.tokens < 1) return globalBucket;
     if (userBucket.tokens < 1) return userBucket;
     if (sessionBucket.tokens < 1) return sessionBucket;
 
     // All pass — consume one token from each, and clear notified flags so
     // future blocks get a fresh debounce window.
-    if (!skipGlobal) globalBucket.tokens -= 1;
+    globalBucket.tokens -= 1;
     sessionBucket.tokens -= 1;
     userBucket.tokens -= 1;
-    if (!skipGlobal) globalBucket.notified = false;
+    globalBucket.notified = false;
     sessionBucket.notified = false;
     userBucket.notified = false;
     return null;
@@ -647,11 +678,13 @@ export class SessionRouter {
     return bucket;
   }
 
-  private getOrCreateGlobalBucket(now: number, capacity: number): TokenBucket {
-    if (!this.globalBucket) {
-      this.globalBucket = { tokens: capacity, lastRefill: now, notified: false };
-    }
-    return this.globalBucket;
+  private getOrCreateGlobalBucket(now: number, capacity: number, paused = false): TokenBucket {
+    const existing = paused ? this.pausedGlobalBucket : this.globalBucket;
+    if (existing) return existing;
+    const bucket = { tokens: capacity, lastRefill: now, notified: false };
+    if (paused) this.pausedGlobalBucket = bucket;
+    else this.globalBucket = bucket;
+    return bucket;
   }
 
   private refillBucket(bucket: TokenBucket, now: number, capacity: number): void {

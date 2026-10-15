@@ -254,7 +254,8 @@ export async function startBot(config: ReturnType<typeof loadConfig>, multi: boo
     }
 
     // --- Session router ---
-    const router = new SessionRouter(config, gateway.botId, () => gateway.ownerUid, store, () => gateway.ownerChannelId);
+    const router = new SessionRouter(config, gateway.botId, () => gateway.ownerUid, store);
+    console.warn('[codex-channel-octo] Online reconciliation requires the exact registered owner_uid. The Bot API provides no scoped-alias binding; rewritten owner UIDs require the offline maintenance procedure.');
 
     // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
     const activeHandlers = new Set<Promise<void>>();
@@ -343,6 +344,7 @@ export async function handleMessage(
     const turnGroupContext = turn.guard(groupContext);
     const sendMessage = (params: Parameters<typeof import('./octo/api.js').sendMessage>[0]) => {
       turn.assertPublishable();
+      // postJson applies its own 30-second request cap in addition to this turn signal.
       return sendTurnMessage({ ...params, signal: turn.signal });
     };
     let stage: FailureStage = 'prepare';
@@ -372,7 +374,7 @@ export async function handleMessage(
       // history (any member can — by the shared-workspace design) and does NOT
       // clear long-term memory. See commands.ts.
       if (result.cleanContent !== undefined) {
-        const command = handleCommand(result.cleanContent, sessionKey, store, config, msg.message_seq);
+        const command = handleCommand(result.cleanContent, sessionKey, turnStore, config, msg.message_seq);
         if (command.handled) {
           if (command.reply) {
             await sendMessage({
@@ -871,7 +873,7 @@ export async function handleMessage(
   // next legitimate turn — the rate limit reply went out but the content
   // still landed in [Group context]. Ordinary unmentioned chatter still
   // caches, but control events must never become conversation context.
-  const SUPPRESS_GROUP_CACHE = new Set(['rate_limited', 'oversized', 'quarantined', 'control']);
+  const SUPPRESS_GROUP_CACHE = new Set(['rate_limited', 'oversized', 'control', 'stopping']);
   const suppressGroupCache =
     !!routeResult?.rejectionReason && SUPPRESS_GROUP_CACHE.has(routeResult.rejectionReason);
 

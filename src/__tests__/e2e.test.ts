@@ -30,7 +30,7 @@ vi.mock('../octo/api.js', () => ({
     ws_url: 'ws://localhost',
     api_url: 'https://test.example.com',
     owner_uid: 'owner',
-    owner_channel_id: 'ch-owner',
+    owner_channel_id: 'owner',
   }),
   generateClientMsgNo: vi.fn().mockReturnValue('client-msg-001'),
   fetchUserInfo: vi.fn().mockResolvedValue(null),
@@ -213,7 +213,7 @@ describe('E2E smoke tests', () => {
     store.init();
     groupContext = new GroupContext(adapter, config.context.maxContextChars);
     streamRelay = new StreamRelay();
-    router = new SessionRouter(config, BOT_ID);
+    router = new SessionRouter(config, BOT_ID, 'owner', store);
 
     // Default mock: queryAgent yields a simple response
     mockQueryYield('Hello from Claude');
@@ -737,6 +737,10 @@ describe('E2E smoke tests', () => {
     // simulateMessage should not throw — error is caught internally
     await simulateMessage(msg, config, store, router, groupContext, streamRelay);
 
+    expect(store.isTurnQuarantined(USER_UID)).toBe(true);
+    vi.mocked(queryAgent).mockClear();
+    await simulateMessage(makeDmMsg('blocked next task'), config, store, router, groupContext, streamRelay);
+    expect(queryAgent).not.toHaveBeenCalled();
     // Error reply should be sent
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -758,6 +762,24 @@ describe('E2E smoke tests', () => {
         content: expect.stringContaining('模型处理未完成'),
       }),
     );
+  });
+
+  it('keeps a real prepare-stage storage failure clean without invoking inference', async () => {
+    vi.spyOn(store, 'appendUser').mockImplementationOnce(() => { throw new Error('PRIVATE_STORE_FAILURE'); });
+    await simulateMessage(makeDmMsg('prepare failure'), config, store, router, groupContext, streamRelay);
+    expect(queryAgent).not.toHaveBeenCalled();
+    expect(store.isTurnQuarantined(USER_UID)).toBe(false);
+  });
+
+  it('caches bounded group chatter during a pause but excludes recovery commands', async () => {
+    const id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    store.beginTurn(GROUP_CHANNEL, id);
+    store.finishTurn(GROUP_CHANNEL, id, 'quarantined');
+    await simulateMessage(makeGroupMsg('news while paused', true), config, store, router, groupContext, streamRelay);
+    expect(groupContext.buildContext(GROUP_CHANNEL)).toContain('news while paused');
+    await simulateMessage(makeGroupMsg(`/reconcile ${id}`, true), config, store, router, groupContext, streamRelay);
+    expect(groupContext.buildContext(GROUP_CHANNEL)).not.toContain('/reconcile');
+    expect(queryAgent).not.toHaveBeenCalled();
   });
 
   it('swallows error reply failure silently', async () => {

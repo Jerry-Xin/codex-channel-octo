@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require exact registered owner identity for online recovery. The current Bot
+  API does not provide scoped-alias bindings; rewritten owner UIDs now receive
+  an explicit offline-maintenance path. Add hashed recovery audits, a separate
+  aggregate paused-traffic budget, pause-time group-context caching and CI type
+  checks for recovery contracts, with real-handler quarantine regressions.
+
 - Bind privileged recovery to registration-provided owner identities and allow
   owner-DM recovery of explicit third-party sessions without gateway downtime.
   Paused traffic no longer consumes the global model budget; active tasks have

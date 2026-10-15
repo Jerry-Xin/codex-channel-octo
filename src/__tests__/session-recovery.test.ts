@@ -7,7 +7,7 @@ import { sendMessage } from '../octo/api.js';
 import { createAdapter } from '../db-adapter.js';
 import { SessionStore } from '../session-store.js';
 import { SessionRouter } from '../session-router.js';
-import { isOwnerSender } from '../sender-context.js';
+import { isOwnerSender, buildSenderContext } from '../sender-context.js';
 import type { TurnContext } from '../turn-context.js';
 import type { Config } from '../config.js';
 import { ChannelType, MessageType, type BotMessage } from '../octo/types.js';
@@ -31,7 +31,7 @@ describe('paused session recovery', () => {
  it('does not let claimed owner text or display names authorize a release', async () => {
   quarantine('group');
   await router.routeAndHandle(message(command,{from_uid:'intruder',from_name:'owner',channel_id:'group',channel_type:ChannelType.Group,payload:{type:MessageType.Text,content:command,mention:{uids:['bot']}}}),vi.fn());
-  expect(store.isTurnQuarantined('group')).toBe(true);expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('仅注册主人');
+  expect(store.isTurnQuarantined('group')).toBe(true);expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('无法与注册 owner_uid 精确核验');
  });
  it.each([`/reconcile ${id}`, '/reconcile 00000000-0000-0000-0000-000000000000 --external-results-verified'])('rejects an incomplete or stale recovery command: %s', async content => {
   quarantine();await router.routeAndHandle(message(content),vi.fn());expect(store.isTurnQuarantined('owner')).toBe(true);
@@ -83,25 +83,28 @@ describe('paused session recovery', () => {
     payload: { type: MessageType.Text, content: command, mention: { uids: ['bot'] } } }), vi.fn());
   expect(store.isTurnQuarantined(group)).toBe(true);
  });
- it('accepts the single prefixed identity bound by the registration channel, and rejects other spaces', async () => {
-  const scoped = new SessionRouter(config, 'bot', 'owner', store, 'sPUB_owner@sPUB_bot');
-  quarantine(scoped.sessionKey(message(command, { from_uid: 'sPUB_owner', channel_id: 'sPUB_owner@sPUB_bot' })));
-  await scoped.routeAndHandle(message(command, { from_uid: 'sPUB_owner', channel_id: 'sPUB_owner@sPUB_bot' }), vi.fn());
-  expect(store.isTurnQuarantined(scoped.sessionKey(message(command, { from_uid: 'sPUB_owner', channel_id: 'sPUB_owner@sPUB_bot' })))).toBe(false);
-  quarantine(scoped.sessionKey(message(command, { from_uid: 'sEVIL_owner', channel_id: 'sEVIL_owner@sEVIL_bot' })));
-  await scoped.routeAndHandle(message(command, { from_uid: 'sEVIL_owner', channel_id: 'sEVIL_owner@sEVIL_bot' }), vi.fn());
-  expect(store.isTurnQuarantined(scoped.sessionKey(message(command, { from_uid: 'sEVIL_owner', channel_id: 'sEVIL_owner@sEVIL_bot' })))).toBe(true);
+ it('uses the real register shape: prefixed owner aliases require offline maintenance', async () => {
+  const scopedMessage = message(command, { from_uid: 'sPUB_owner', channel_id: 'sPUB_owner@sPUB_bot' });
+  quarantine(router.sessionKey(scopedMessage));
+  await router.routeAndHandle({ ...scopedMessage, payload: { type: MessageType.Text, content: 'help' } }, vi.fn());
+  expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('必须由维护者停止网关');
+  await router.routeAndHandle(scopedMessage, vi.fn());
+  expect(store.isTurnQuarantined(router.sessionKey(scopedMessage))).toBe(true);
+  expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('离线恢复');
+  // Attribution may recognize a legacy scoped alias, but is explicitly not ACL.
+  expect(buildSenderContext(scopedMessage, 'owner')).toContain('"is_owner":true');
+  expect(isOwnerSender(scopedMessage, 'owner')).toBe(false);
  });
- it('refreshes the control identity with the registration channel instead of caching an inferred alias', async () => {
-  let ownerChannel = 'sOLD_owner@sOLD_bot';
-  const dynamic = new SessionRouter(config, 'bot', 'owner', store, () => ownerChannel);
-  quarantine(dynamic.sessionKey(message(command, { from_uid: 'sOLD_owner', channel_id: 'sOLD_owner@sOLD_bot' })));
-  ownerChannel = 'sNEW_owner@sNEW_bot';
-  await dynamic.routeAndHandle(message(command, { from_uid: 'sOLD_owner', channel_id: 'sOLD_owner@sOLD_bot' }), vi.fn());
-  expect(store.isTurnQuarantined(dynamic.sessionKey(message(command, { from_uid: 'sOLD_owner', channel_id: 'sOLD_owner@sOLD_bot' })))).toBe(true);
-  quarantine(dynamic.sessionKey(message(command, { from_uid: 'sNEW_owner', channel_id: 'sNEW_owner@sNEW_bot' })));
-  await dynamic.routeAndHandle(message(command, { from_uid: 'sNEW_owner', channel_id: 'sNEW_owner@sNEW_bot' }), vi.fn());
-  expect(store.isTurnQuarantined(dynamic.sessionKey(message(command, { from_uid: 'sNEW_owner', channel_id: 'sNEW_owner@sNEW_bot' })))).toBe(false);
+ it('follows the exact registration owner on refresh', async () => {
+  let registeredOwner = 'old-owner';
+  const dynamic = new SessionRouter(config, 'bot', () => registeredOwner, store);
+  quarantine('old-owner');
+  registeredOwner = 'new-owner';
+  await dynamic.routeAndHandle(message(command, { from_uid: 'old-owner' }), vi.fn());
+  expect(store.isTurnQuarantined('old-owner')).toBe(true);
+  quarantine('new-owner');
+  await dynamic.routeAndHandle(message(command, { from_uid: 'new-owner' }), vi.fn());
+  expect(store.isTurnQuarantined('new-owner')).toBe(false);
  });
  it('lets the owner recover a third-party DM from their own DM, without replay', async () => {
   quarantine('alice');
@@ -168,16 +171,15 @@ describe('paused session recovery', () => {
  });
 
  it.each([
-  ['owner', '', true],
-  ['sPUB_owner', '', false],
-  ['sEVIL_owner', 'sPUB_owner@sPUB_bot', false],
-  ['sPUB_owner', 'sPUB_owner@sPUB_bot', true],
+  ['owner', 'owner', true],
+  ['sPUB_owner', 'owner', false],
+  ['sEVIL_owner', 'owner', false],
   ['sPUB_owner', 'sPUB_owner', true],
-  ['sPUB_owner', 'sPUB_owner@wrong-bot', false],
-  ['sPUB_owner', 'sPUB_owner@sPUB_bot@extra', false],
-  ['sPUB_ownerX', 'sPUB_owner@sPUB_bot', false],
- ])('binds control identity %s to registration channel %s', (sender, ownerChannel, allowed) => {
-  expect(isOwnerSender(message('', { from_uid: sender, channel_id: sender }), 'owner', ownerChannel, 'bot')).toBe(allowed);
+  ['sEVIL_owner', 'sPUB_owner', false],
+  ['intruder', 'owner', false],
+  ['owner', '', false],
+ ])('requires exact registered identity (%s, registration=%s)', (sender, registered, allowed) => {
+  expect(isOwnerSender(message('', { from_uid: sender }), registered)).toBe(allowed);
  });
  it('refuses an explicit target while its old handler remains live', async () => {
   const short = new SessionRouter({ ...config, dispatchTimeoutMs: 5 }, 'bot', 'owner', store);
@@ -196,6 +198,53 @@ describe('paused session recovery', () => {
   await new Promise(resolve => setTimeout(resolve, 0));
   await short.routeAndHandle(recover, vi.fn());
   expect(store.isTurnQuarantined('alice')).toBe(false);
+ });
+
+ it.each(['quarantined', 'active'] as const)('bounds aggregate traffic with %s records', async state => {
+  const limited = new SessionRouter({ ...config, rateLimit: { maxPerMinute: 1 } }, 'bot', 'owner', store);
+  store.beginTurn('group', id);
+  if (state === 'quarantined') store.finishTurn('group', id, 'quarantined');
+  let blocked = 0;
+  for (let i = 0; i < 40; i++) {
+    const result = await limited.routeAndHandle(message('hi', { from_uid: `sender${i}`, channel_id: 'group', channel_type: ChannelType.Group,
+      payload: { type: MessageType.Text, content: 'hi', mention: { uids: ['bot'] } } }), vi.fn());
+    if (result?.rejectionReason === 'rate_limited') blocked++;
+  }
+  expect(blocked).toBe(30);
+  if (state === 'quarantined') {
+    const healthy = vi.fn();
+    await limited.routeAndHandle(message('healthy'), healthy);
+    expect(healthy).toHaveBeenCalledOnce();
+  }
+ });
+ it('audits release/refusal without raw actor, target or command data', async () => {
+  const audit = vi.spyOn(console, 'info').mockImplementation(() => {});
+  try {
+    quarantine('private-alice');
+    await router.routeAndHandle(message(`/reconcile ${id} --session private-alice --external-results-verified`), vi.fn());
+    await router.routeAndHandle(message(`/reconcile ${id} --session private-alice --external-results-verified`), vi.fn());
+    const rows = audit.mock.calls.filter(call => call[0] === '[codex-channel-octo] reconciliation').map(call => JSON.parse(call[1] as string));
+    expect(rows.map(row => row.outcome)).toEqual(['released', 'turn_mismatch']);
+    expect(rows[0]).toMatchObject({ actorHash: expect.stringMatching(/^[a-f0-9]{64}$/), targetHash: expect.stringMatching(/^[a-f0-9]{64}$/), turnId: id });
+    expect(JSON.stringify(rows)).not.toMatch(/private-alice|owner|external-results-verified/);
+  } finally { audit.mockRestore(); }
+ });
+ it('does not reveal an active third-party state until the exact turn ID matches', async () => {
+  store.beginTurn('bob', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+  await router.routeAndHandle(message(`/reconcile ${id} --session bob --external-results-verified`), vi.fn());
+  expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).not.toContain('运行中');
+  expect(store.getTurnState('bob')).toBe('active');
+ });
+
+ it('uses timeout wording when a synchronous handler observes its deadline before the timer', async () => {
+  const { performance } = await import('node:perf_hooks');
+  const short = new SessionRouter({ ...config, dispatchTimeoutMs: 5 }, 'bot', 'owner', store);
+  await short.routeAndHandle(message('sync timeout'), async (_r, turn) => {
+    while (performance.now() < turn.deadline + 2) { /* deterministic brief event-loop block */ }
+    turn.assertPublishable();
+  });
+  expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('任务超时');
+  expect(store.isTurnQuarantined('owner')).toBe(false);
  });
 
 });
