@@ -2,6 +2,11 @@
  * Session Router — routing + concurrency control + mention gate + rate limiting.
  */
 
+import { isOwnerSender } from './sender-context.js';
+import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
+import { AgentFailure, diagnosticId } from './agent-failure.js';
+import { TurnContext, type TurnLedger } from './turn-context.js';
 import type { Config } from './config.js';
 import type { BotMessage, MentionEntity } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
@@ -33,7 +38,7 @@ export interface RouteResult {
    * so the type doesn't suggest a wider contract than the code provides.
    * Add more reasons here when corresponding emit sites land.
    */
-  rejectionReason?: 'rate_limited' | 'oversized';
+  rejectionReason?: 'rate_limited' | 'oversized' | 'quarantined' | 'control' | 'stopping';
 }
 
 interface TokenBucket {
@@ -61,15 +66,23 @@ export class SessionRouter {
   /** G20: per-user buckets keyed by from_uid alone (cross-channel rate limit). */
   private readonly userBuckets = new Map<string, TokenBucket>();
   private globalBucket: TokenBucket | null = null;
+  private pausedGlobalBucket: TokenBucket | null = null;
   /**
    * G14: UIDs known to be bots. Initialized with this bot's robotId; can be
    * extended via registerKnownBot() for future multi-bot deployments.
    */
   private readonly knownBotUids = new Set<string>();
   private readonly mentionPreferences: MentionPreferences;
+  private readonly executions = new Set<Promise<void>>();
+  private readonly turns = new Map<TurnContext, string>();
+  private stopping = false;
+  private readonly quarantineNotices = new Map<string, number>();
+  private readonly quarantined = new Map<string, string>();
+  private readonly ledger?: TurnLedger;
   private readonly conversationMarkdown: ConversationMarkdown;
 
   constructor(config: Config, robotId: string, ownerUid: string | (() => string) = '', documentStore?: import('./conversation-md.js').ConversationDocumentStore) {
+    if (documentStore && 'beginTurn' in documentStore) this.ledger = documentStore as typeof documentStore & TurnLedger;
     this.config = config;
     this.robotId = robotId;
     this.ownerUid = ownerUid;
@@ -151,82 +164,179 @@ export class SessionRouter {
    */
   async routeAndHandle(
     msg: BotMessage,
-    handler: (result: RouteResult) => Promise<void>,
+    handler: (result: RouteResult, turn: TurnContext) => Promise<void>,
   ): Promise<RouteResult | null> {
     const key = this.sessionKey(msg);
     return this.withSessionLock(key, async () => {
-      const result = await this.processMessage(msg, key);
+      if (this.stopping) return { sessionKey: key, shouldProcess: false, message: msg, rejectionReason: 'stopping' };
+      const result = await this.processMessage(msg, key, true);
+      if (!result || !result.shouldProcess) return result;
+      if (this.stopping) return { ...result, shouldProcess:false, rejectionReason:'stopping' };
+      // Control commands pass transport/mention and session/user rate gates but do not
+      // enter the model or begin a new execution generation.
+      if (await this.handleReconciliation(result)) {
+        return { ...result, shouldProcess:false, rejectionReason:'control' };
+      }
+      // SQLite is authoritative when present: an offline release must not be
+      // shadowed forever by the router's in-memory quarantine cache.
+      const quarantinedId = this.ledger
+        ? this.ledger.getQuarantinedTurnId(key)
+        : this.quarantined.get(key);
+      if (quarantinedId) {
+        const lastNotice = this.quarantineNotices.get(key);
+        if (lastNotice === undefined || Date.now() - lastNotice >= 60_000) {
+          if (this.quarantineNotices.size >= 1000) this.quarantineNotices.delete(this.quarantineNotices.keys().next().value!);
+          this.quarantineNotices.delete(key);
+          this.quarantineNotices.set(key, Date.now());
+          await this.replySafe(msg, this.pauseNotice(msg, key, quarantinedId));
+        }
+        return { ...result, shouldProcess:false, rejectionReason:'quarantined' };
+      }
       if (result && result.shouldProcess) {
-        await this.runHandlerWithTimeout(result, handler);
+        const admitted = await this.runHandlerWithTimeout(result, handler);
+        if (!admitted) return { ...result, shouldProcess: false, rejectionReason: 'stopping' };
       }
       return result;
     });
   }
 
-  /**
-   * #141: Run the handler under a dispatch timeout so a hung turn (a stuck SDK
-   * query, a wedged tool subprocess, a stalled stream) cannot block the session
-   * forever. The handler runs inside withSessionLock — if it never returns, the
-   * lock's gate never resolves and EVERY subsequent message for this session is
-   * stuck permanently (silent). Racing the handler against a timeout guarantees
-   * the lock releases.
-   *
-   * Scope (mirrors openclaw #75): we do NOT cancel the in-flight turn — the SDK
-   * query keeps running to completion in the background; we only unblock the
-   * queue. Worst case is a delayed real reply arriving after the apology.
-   *
-   * `timeoutError` is a per-invocation Error so the catch identifies OUR timeout
-   * by reference equality, never by string comparison (a same-text upstream
-   * error must not be misclassified).
-   */
-  private async runHandlerWithTimeout(
-    result: RouteResult,
-    handler: (result: RouteResult) => Promise<void>,
-  ): Promise<void> {
-    const timeoutMs = this.config.dispatchTimeoutMs;
-    if (!timeoutMs || timeoutMs <= 0) {
-      // Timeout disabled — run unguarded.
-      await handler(result);
-      return;
+  /** Shutdown tracks real handler completion, even after the queue gate settles. */
+  async stopTurns(graceMs = 5000): Promise<void> {
+    this.stopping = true;
+    for (const [turn, session] of this.turns) {
+      turn.cancel();
+      this.finishCancelledTurn(session, turn);
     }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([Promise.allSettled([...this.executions]), new Promise<void>(resolve => { timer = setTimeout(resolve, graceMs); })]);
+    if (timer) clearTimeout(timer);
+  }
 
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    const timeoutError = new Error(`dispatch timed out after ${timeoutMs}ms`);
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutHandle = setTimeout(() => reject(timeoutError), timeoutMs);
-    });
-
-    // The handler keeps running after a timeout (we don't cancel the in-flight
-    // turn — see scope note above). Once the race settles on timeoutError, that
-    // orphaned promise is no longer awaited; attach a no-op catch so a late
-    // rejection from a handler that doesn't self-contain its errors can't surface
-    // as an unhandledRejection. Today's caller (index.ts) is fully try/caught, so
-    // this is defense-in-depth for future callers.
-    const handlerPromise = handler(result);
-    handlerPromise.catch(() => { /* swallow late rejection after timeout */ });
-
-    try {
-      await Promise.race([handlerPromise, timeoutPromise]);
-    } catch (err) {
-      if (err === timeoutError) {
-        console.warn(
-          `session-router: dispatch hung past ${timeoutMs}ms, releasing session lock (session=${result.sessionKey})`,
-        );
-        // Bounded apology — replySafe swallows its own errors, and the
-        // underlying sendMessage in octo/api.ts is itself time-bounded, so a
-        // sick Octo API can't re-hang us here.
-        await this.replySafe(result.message, '⚠️ 处理超时，请稍后重试。');
-        return; // swallow: the lock releases, the queue advances
+  private async runHandlerWithTimeout(result: RouteResult, handler: (result: RouteResult, turn: TurnContext) => Promise<void>): Promise<boolean> {
+    if (this.stopping) return false;
+    const id = diagnosticId();
+    const generation = this.ledger?.beginTurn(result.sessionKey, id) ?? 1;
+    const turn = new TurnContext(this.config.dispatchTimeoutMs, generation, id);
+    this.turns.set(turn, result.sessionKey);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    // The timeout path remains quarantined even if a cancelled promise settles:
+    // subprocess/remote-effect termination cannot be proven by promise completion.
+    const task = Promise.resolve().then(() => handler(result, turn));
+    this.executions.add(task);
+    const settled = task.then(() => {}, err => {
+      if (!turn.signal.aborted) console.error('session-router: handler error', summarizeAgentError(err));
+    }).finally(() => {
+      this.executions.delete(task); this.turns.delete(turn);
+      turn.revoke();
+      if (!turn.signal.aborted) {
+        if (turn.needsReconciliation && !this.ledger) this.quarantined.set(result.sessionKey, turn.turnId);
+        this.ledger?.finishTurn(result.sessionKey, turn.turnId, turn.needsReconciliation ? 'quarantined' : 'clean');
       }
-      // A real handler error — index.ts's handler already catches and replies
-      // internally, so reaching here is unexpected. Swallow to keep the lock
-      // release path identical (never let an error wedge the queue).
-      console.error(
-        `session-router: handler error (session=${result.sessionKey}): ${summarizeAgentError(err)}`,
-      );
-    } finally {
-      if (timeoutHandle) clearTimeout(timeoutHandle);
+    });
+    let onAbort!: () => void;
+    const cancelled = new Promise<void>(resolve => {
+      onAbort = resolve; turn.signal.addEventListener('abort', onAbort, { once:true });
+    });
+    try {
+      const waits: Promise<void>[] = [settled, cancelled];
+      if (this.config.dispatchTimeoutMs > 0) waits.push(new Promise<void>(resolve => {
+        timeout = setTimeout(() => { timedOut = true; turn.cancel(); resolve(); }, this.config.dispatchTimeoutMs);
+      }));
+      await Promise.race(waits);
+      if ((timedOut || performance.now() >= turn.deadline) && !this.stopping) {
+        this.finishCancelledTurn(result.sessionKey, turn);
+        await this.replySafe(result.message, turn.executionRisk === 'proven_not_started' ? `⚠️ 任务超时，模型执行未启动；可以发送新任务。编号 ${turn.turnId}` : this.pauseNotice(result.message, result.sessionKey, turn.turnId));
+      } else if (turn.signal.aborted && !this.stopping) {
+        this.finishCancelledTurn(result.sessionKey, turn);
+        await this.replySafe(result.message, turn.executionRisk === 'proven_not_started' ? `⚠️ 任务已取消，模型执行未启动；可以发送新任务。编号 ${turn.turnId}` : this.pauseNotice(result.message, result.sessionKey, turn.turnId));
+      }
+    } finally { if (timeout) clearTimeout(timeout); turn.signal.removeEventListener('abort',onAbort); }
+    return true;
+  }
+
+  private finishCancelledTurn(session: string, turn: TurnContext): void {
+    const uncertain = turn.executionRisk !== 'proven_not_started';
+    if (uncertain && !this.ledger) this.quarantined.set(session, turn.turnId);
+    this.ledger?.finishTurn(session, turn.turnId, uncertain ? 'quarantined' : 'clean');
+  }
+
+  private isControlOwner(msg: BotMessage): boolean {
+    return isOwnerSender(msg, this.getOwnerUid());
+  }
+
+  private auditReconciliation(msg: BotMessage, target: string, turnId: string | undefined,
+    outcome: 'unauthorized' | 'invalid_command' | 'dm_required' | 'turn_mismatch' | 'handler_running' | 'active' | 'released' | 'store_failed'): void {
+    // Linkable locally, without raw private session/actor identifiers or command text.
+    const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+    console.info('[codex-channel-octo] reconciliation', JSON.stringify({
+      actorHash: digest(msg.from_uid), targetHash: digest(target), turnId, outcome,
+    }));
+  }
+
+  private pauseNotice(msg: BotMessage, key: string, turnId: string): string {
+    const prefix = `⚠️ 上次任务的执行状态尚未确认，本会话暂停新任务。编号 ${turnId}。`;
+    if (this.isControlOwner(msg)) return `${prefix}核对外部结果后发送 /reconcile ${turnId} --external-results-verified 恢复；不会重跑旧任务。`;
+    return `${prefix}请将编号和会话标识 ${key} 交给维护者。只有来信 UID 与注册 owner_uid 完全一致的主人可在本人私聊中发送 /reconcile ${turnId} --session ${key} --external-results-verified；若通道改写主人 UID，则必须由维护者停止网关后使用离线恢复流程，本频道无法授权解除。不会重跑旧任务。`;
+  }
+
+  /** Registration-bound control path; never invokes a model or resets history. */
+  private async handleReconciliation(result: RouteResult): Promise<boolean> {
+    const { message: msg, sessionKey: key, cleanContent } = result;
+    if (msg.payload.type !== MessageType.Text || this.isCronFire(msg)) return false;
+    const body = cleanContent?.trim() ?? '';
+    if (!/^\/reconcile(?:\s|$)/i.test(body)) return false;
+    if (!this.isControlOwner(msg)) {
+      // Silent on healthy sessions; mark control so commands never enter history.
+      this.auditReconciliation(msg, key, undefined, 'unauthorized');
+      if (this.ledger?.isTurnQuarantined(key) || this.quarantined.has(key)) {
+        await this.replySafe(msg, '此来信 UID 无法与注册 owner_uid 精确核验；如通道改写 UID，请由维护者停止网关并按离线恢复流程处理。');
+      }
+      return true;
     }
+    const match = /^\/reconcile\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\s+--session\s+([^\s\x00-\x1f\x7f]{1,512}))?\s+--external-results-verified$/i.exec(body);
+    if (!match) {
+      this.auditReconciliation(msg, key, undefined, 'invalid_command');
+      await this.replySafe(msg, '核对外部结果后发送 /reconcile <任务编号> [--session <会话标识>] --external-results-verified；指定其他会话时请从本人私聊发送。');
+      return true;
+    }
+    const target = match[2] ?? key;
+    if (match[2] && msg.channel_type !== ChannelType.DM) {
+      this.auditReconciliation(msg, target, match[1].toLowerCase(), 'dm_required');
+      await this.replySafe(msg, '请从与机器人的本人私聊中指定目标会话。');
+      return true;
+    }
+    // These checks and the conditional SQLite update are synchronous: another
+    // queued turn cannot interleave. Never nest session locks (cross-target
+    // commands could deadlock); active rows and retained handlers fail closed.
+    let reply: string;
+    const id = match[1].toLowerCase();
+    let outcome: 'turn_mismatch' | 'handler_running' | 'active' | 'released';
+    try {
+      const currentId = this.ledger ? this.ledger.getQuarantinedTurnId(target) : this.quarantined.get(target);
+      // Do not disclose third-party runtime state for a guessed key/wrong ID.
+      if (currentId !== id) {
+        outcome = 'turn_mismatch';
+        reply = '任务编号与目标会话的暂停记录不匹配，请检查编号和会话标识。';
+      } else if ([...this.turns.values()].includes(target)) {
+        outcome = 'handler_running';
+        reply = '原任务仍在停止处理中，暂时不能恢复，请稍后再试。';
+      } else if (this.ledger?.getTurnState(target) === 'active') {
+        outcome = 'active';
+        reply = '目标任务仍标记为运行中，不能解除隔离；请联系维护者核对运行状态，任务编号不一定有误。';
+      } else {
+        const released = this.ledger ? this.ledger.reconcileTurn(target, id) : this.quarantined.get(target) === id;
+        if (released) { this.quarantined.delete(target); this.quarantineNotices.delete(target); }
+        outcome = released ? 'released' : 'turn_mismatch';
+        reply = released ? '✓ 目标会话已恢复，没有重跑旧任务。可以发送新消息。' : '任务编号与目标会话的暂停记录不匹配，请检查编号和会话标识。';
+      }
+    } catch {
+      this.auditReconciliation(msg, target, id, 'store_failed');
+      throw new AgentFailure({ stage: 'prepare', category: 'history_failed', source: 'local', evidence: 'structured' });
+    }
+    this.auditReconciliation(msg, target, id, outcome);
+    await this.replySafe(msg, reply);
+    return true;
   }
 
   async route(msg: BotMessage): Promise<RouteResult | null> {
@@ -350,7 +460,7 @@ export class SessionRouter {
     return isAuthenticCronFire(msg.payload);
   }
 
-  private async processMessage(msg: BotMessage, key: string): Promise<RouteResult | null> {
+  private async processMessage(msg: BotMessage, key: string, quarantineAware = false): Promise<RouteResult | null> {
     // Drop anything that isn't a real conversation channel (DM / group /
     // community topic). Octo emits system/command channels (e.g. channel_type 8
     // "systemcmdonline" on connect) that otherwise slip past the DM/group gates
@@ -434,7 +544,7 @@ export class SessionRouter {
     // user spam. Without this a fire that lands while the owner's bucket is
     // exhausted would be silently dropped while its nextRun has already advanced.
     if (!this.isCronFire(msg)) {
-      const blocker = this.checkAllRateLimits(key, msg.from_uid);
+      const blocker = this.checkAllRateLimits(key, msg.from_uid, quarantineAware && (this.ledger ? this.ledger.getTurnState(key) === 'quarantined' : this.quarantined.has(key)));
       if (blocker) {
         if (!blocker.notified) {
           blocker.notified = true;
@@ -512,14 +622,14 @@ export class SessionRouter {
    * blocked by per-user limit doesn't get spammed when their per-session
    * bucket still has tokens.
    */
-  private checkAllRateLimits(key: string, uid: string): TokenBucket | null {
+  private checkAllRateLimits(key: string, uid: string, paused = false): TokenBucket | null {
     this.cleanStaleBuckets();
 
     const now = Date.now();
     const maxPerMinute = this.config.rateLimit.maxPerMinute;
     const globalMax = maxPerMinute * GLOBAL_RATE_MULTIPLIER;
 
-    const globalBucket = this.getOrCreateGlobalBucket(now, globalMax);
+    const globalBucket = this.getOrCreateGlobalBucket(now, globalMax, paused);
     // Per-participant session bucket: key by session AND uid. For a group the
     // sessionKey is the channel_id (shared), so keying the rate bucket by
     // sessionKey alone would collapse the WHOLE room into one maxPerMinute quota
@@ -568,11 +678,13 @@ export class SessionRouter {
     return bucket;
   }
 
-  private getOrCreateGlobalBucket(now: number, capacity: number): TokenBucket {
-    if (!this.globalBucket) {
-      this.globalBucket = { tokens: capacity, lastRefill: now, notified: false };
-    }
-    return this.globalBucket;
+  private getOrCreateGlobalBucket(now: number, capacity: number, paused = false): TokenBucket {
+    const existing = paused ? this.pausedGlobalBucket : this.globalBucket;
+    if (existing) return existing;
+    const bucket = { tokens: capacity, lastRefill: now, notified: false };
+    if (paused) this.pausedGlobalBucket = bucket;
+    else this.globalBucket = bucket;
+    return bucket;
   }
 
   private refillBucket(bucket: TokenBucket, now: number, capacity: number): void {

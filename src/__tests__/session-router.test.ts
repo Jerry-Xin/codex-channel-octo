@@ -477,7 +477,7 @@ describe('dispatch timeout (#141)', () => {
     vi.clearAllMocks();
   });
 
-  it('a hung handler does not block the next message on the same session', async () => {
+  it('a hung handler quarantines its session without starting the next message', async () => {
     const router = new SessionRouter(
       makeConfig({ rateLimit: { maxPerMinute: 100 }, dispatchTimeoutMs: 50 }),
       ROBOT_ID,
@@ -487,7 +487,7 @@ describe('dispatch timeout (#141)', () => {
     // Message 1: handler never resolves (simulates a hung agent turn).
     const p1 = router.routeAndHandle(
       makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'same-user' }),
-      () => new Promise<void>(() => { /* never resolves */ }),
+      (_result, turn) => { turn.executionRisk = 'unknown'; return new Promise<void>(() => { /* never resolves */ }); },
     );
 
     // Message 2: a normal fast handler on the SAME session. Without the
@@ -499,8 +499,8 @@ describe('dispatch timeout (#141)', () => {
 
     await Promise.all([p1, p2]);
 
-    // Message 2 ran — the lock was released after message 1 timed out.
-    expect(completed).toEqual([2]);
+    // Message 2 remains blocked because the started execution is uncertain.
+    expect(completed).toEqual([]);
   });
 
   it('sends a single bounded apology on timeout', async () => {
@@ -516,7 +516,7 @@ describe('dispatch timeout (#141)', () => {
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(vi.mocked(sendMessage).mock.calls[0][0]).toMatchObject({
-      content: expect.stringContaining('处理超时'),
+      content: expect.stringContaining('任务超时'),
     });
   });
 

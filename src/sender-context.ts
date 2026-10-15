@@ -3,7 +3,7 @@ import { safeSenderMetadata, type SafeText } from './prompt-safety.js';
 import { isRegistrationOwner, normalizeOwnerUid, transportSpaceId } from './owner-identity.js';
 import { parentGroupNo } from './channel-id.js';
 
-export function buildSenderContext(message: BotMessage, ownerUid: string): SafeText {
+function senderMetadata(message: BotMessage, ownerUid: string) {
   const senderUid = normalizeOwnerUid(message.from_uid);
   const channelId = typeof message.channel_id === 'string' && message.channel_id.length > 0
     && message.channel_id.length <= 512 ? message.channel_id : null;
@@ -23,5 +23,17 @@ export function buildSenderContext(message: BotMessage, ownerUid: string): SafeT
     is_owner: isRegistrationOwner(senderUid, ownerUid)
       || (matchesChannel && isRegistrationOwner(senderUid, ownerUid, senderSpace)),
   };
-  return safeSenderMetadata(metadata);
+  return metadata;
+}
+
+/** Privileged controls require the exact registration UID. The current Bot API
+ * returns owner_channel_id === owner_uid, so that field supplies no trusted
+ * namespace binding. Prompt is_owner above is advisory legacy attribution and
+ * may recognize a scoped alias; it must never authorize a control command.
+ */
+export function isOwnerSender(message: BotMessage, ownerUid: string): boolean {
+  return isRegistrationOwner(message.from_uid, ownerUid);
+}
+export function buildSenderContext(message: BotMessage, ownerUid: string): SafeText {
+  return safeSenderMetadata(senderMetadata(message, ownerUid));
 }

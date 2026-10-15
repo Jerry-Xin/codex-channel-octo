@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Require exact registered owner identity for online recovery. The current Bot
+  API does not provide scoped-alias bindings; rewritten owner UIDs now receive
+  an explicit offline-maintenance path. Add hashed recovery audits, a separate
+  aggregate paused-traffic budget, pause-time group-context caching and CI type
+  checks for recovery contracts, with real-handler quarantine regressions.
+
+- Bind privileged recovery to registration-provided owner identities and allow
+  owner-DM recovery of explicit third-party sessions without gateway downtime.
+  Paused traffic no longer consumes the global model budget; active tasks have
+  distinct refusal messages. Retain unresolved output evidence through expiry,
+  document local-only correlation IDs, and preserve safe API endpoint/status
+  diagnostics across POST/GET/upload failures without retaining server bodies.
+
+- Registered owners can reconcile one paused conversation in chat without taking the gateway offline. Pause notices include its exact task ID; active local handlers, wrong task IDs and non-owners cannot release it. Offline release is no longer shadowed by an in-memory pause flag.
+- Timeout and graceful shutdown do not quarantine positively unstarted model turns. Unknown/observed effects remain protected and are never automatically replayed.
+- Completed execution tombstones expire with retention; unresolved evidence survives. Removed unused stale-replay options and prompt assembly.
+
 ### Added
 
 - Per-turn transport sender metadata matched to the registration UID or its
@@ -50,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supported.
 
 ### Fixed
+
+- Add safe failure categories, bounded opt-in pre-execution recovery and cancellable
+  dispatch. Quarantine uncertain timed-out/crashed execution, fence late callbacks,
+  persist delivery outcomes and commit confirmed history once per turn. Stop
+  automatic replay/continuation when execution safety cannot be established.
+
 
 - Keep Octo recovery alive after failed token refreshes and cooldown-suppressed
   requests, independently of successful REST heartbeats. Coalesce retry timers,

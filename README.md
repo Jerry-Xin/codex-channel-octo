@@ -160,6 +160,36 @@ IM input is **untrusted**; the permission boundary is the **sandbox**, not the p
 - A non-overridable security prefix (anti-injection) is written into each session's sandbox `AGENTS.md` and restated atop the prompt (defense in depth, but only a soft constraint).
 - Each bot has its own `CODEX_HOME`, so IM content does not land in your personal `~/.codex` by default.
 
+### Safe failure handling and recovery
+
+Unknown execution pauses admission across reset/restart; cancellation before SDK
+execution stays clean. New retries default off and cover only positively proven
+pre-execution temporary failures. After verifying effects, an owner whose wire
+UID **exactly matches registered owner_uid** can send:
+
+```text
+/reconcile TURN_ID --external-results-verified
+/reconcile TURN_ID --session SESSION_KEY --external-results-verified
+```
+
+Explicit targets require the owner's own DM. Exact target/turn and retained
+handler checks apply; controls never replay, resend or erase history. Successes
+and refusals are audited using hashed identities and closed outcomes.
+
+**Rewritten owner UIDs require offline maintenance.** The current API returns
+owner_channel_id equal to owner_uid; it supplies no scoped identity binding.
+Incoming UID suffixes cannot authorize controls. Startup and pause notices state
+that a differently prefixed wire UID needs an operator to verify effects, stop
+the gateway and use the [offline helper](docs/issue-26-safe-recovery.md). This may
+interrupt every bot in the supervisor. A UID registered with its prefix already
+works by exact equality. Prompt is_owner metadata is advisory, not this ACL.
+
+Quarantined traffic has its own bounded aggregate budget plus sender/session
+limits; it cannot exhaust healthy model admission or admit unlimited senders.
+Active rows retain the normal budget. Paused group chatter remains in the bounded
+context cache; control commands do not. The 300-second dispatch timeout can be
+adjusted for long tasks without waiving execution reconciliation.
+
 ### Unicode JSONL transport compatibility
 
 On macOS/Linux, an executable proxy escapes raw U+2028/U+2029 in CLI stdout before the SDK's `readline` reader. These are legal JSON string characters, but Node v24.10.0 treats them as line endings and can split valid events, yielding `Failed to parse item` and killing the SDK child. Escaping preserves the decoded event contents, including command output; UTF-8 chunks, stdin, stderr, backpressure and signals are forwarded. The proxy resolves the CLI dependency belonging to the installed SDK. Windows retains direct SDK launch; this Unix workaround is not a validated Windows fix.

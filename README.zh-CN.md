@@ -128,6 +128,30 @@ IM 输入是**不可信**的,权限边界是 **sandbox**,不是 prompt:
 - 安全前缀(防注入)写入每会话沙箱的 `AGENTS.md` 并在 prompt 顶部重申(纵深防御,但仅软约束)。
 - 每 bot 独立 `CODEX_HOME`,IM 内容默认不落入个人 `~/.codex`。
 
+### 安全恢复与执行隔离
+
+执行状态不确定时会话暂停，重启和 reset 不会解除；SDK 尚未启动即取消则保持 clean。
+自动重试默认关闭，只覆盖能证明尚未执行的暂时性故障。核对外部结果后，来信 UID
+**与注册 owner_uid 精确相同**的主人可发送：
+
+```text
+/reconcile TURN_ID --external-results-verified
+/reconcile TURN_ID --session SESSION_KEY --external-results-verified
+```
+
+指定目标须从主人的本人私聊发送；编号、目标及旧本地任务状态仍需核对。恢复不会
+重放、重发或清除历史；成功和拒绝都有仅含身份哈希与固定结果类别的审计记录。
+
+**通道改写主人 UID 时必须离线维护。** 当前 API 的 owner_channel_id 就是 owner_uid，
+不提供可信空间映射，不能凭来信 UID 后缀授权。启动日志及暂停提示会明确说明：
+若来信是不同的前缀 UID，维护者须核对效果、停止网关并使用[离线工具](docs/issue-26-safe-recovery.md)，
+可能中断 supervisor 中的其他机器人。注册 UID 本身已带前缀时，精确匹配仍可在线恢复。
+prompt 的 is_owner 仅作归属提示，不能授权控制命令。
+
+quarantined 流量有独立总限额并保留个人/会话限额，不挤占健康模型请求，也不无限
+放行不同发送者；active 记录仍使用正常限额。暂停期间普通群消息继续进入有界缓存，
+控制命令不进入。默认超时 300 秒可为长任务调整，但不能据此豁免执行核对。
+
 ### Unicode JSONL 传输兼容
 
 macOS/Linux 使用可执行代理，在 SDK 的 `readline` 读取之前将 CLI stdout 中的 U+2028/U+2029 转义。这两个字符在 JSON 字符串中合法，但 Node v24.10.0 将其视为行尾，可能拆坏合法事件，引发 `Failed to parse item` 并终止 SDK 子进程。转义不改变解码后的正文；代理保持 UTF-8 分块、stdin/stderr、背压和信号转发，并解析所安装 SDK 对应的 CLI 依赖。Windows 仍直接启动 SDK，此 Unix 方案不宣称解决 Windows 上的问题。
