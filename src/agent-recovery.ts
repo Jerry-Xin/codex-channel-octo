@@ -1,3 +1,4 @@
+import { inheritSdkDiagnostic } from './private-diagnostics.js';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
 import { TurnFailure, classifyFailure, diagnosticId, type FailureReport, type FailureSnapshot, type ExecutionRisk } from './agent-failure.js';
@@ -55,12 +56,12 @@ export async function* recover<T>(run: () => AsyncIterable<T>, options: {
         if (attempt < config.maxAttempts && now() + delay < end) {
           console.info('[codex-channel-octo] recovery scheduled', JSON.stringify({diagnosticId:id,attempt,category:final.category,delayMs:delay,executionRisk:risk}));
           try { await wait(delay, options.signal); options.signal?.throwIfAborted(); }
-          catch { throw new TurnFailure({ diagnosticId: id, attempts: attempt, first, final, executionRisk: risk, decision: 'cancelled' }); }
+          catch { throw inheritSdkDiagnostic(new TurnFailure({ diagnosticId: id, attempts: attempt, first, final, executionRisk: risk, decision: 'cancelled' }),error); }
           if (now() < end) continue;
         }
         decision = 'exhausted';
       }
-      throw new TurnFailure({ diagnosticId: id, attempts: attempt, first, final, executionRisk: risk, decision });
+      throw inheritSdkDiagnostic(new TurnFailure({ diagnosticId: id, attempts: attempt, first, final, executionRisk: risk, decision }),error);
     }
   }
 }

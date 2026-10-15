@@ -59,6 +59,7 @@ function message(overrides: Partial<BotMessage> = {}): BotMessage {
 describe('production socket → gateway → onInbound → router wiring', () => {
   let root: string;
   let stack: BotStack | undefined;
+  let config: Parameters<typeof startBot>[0];
   let emit: (msg: BotMessage) => void;
   const spies: Array<{ mockRestore(): void }> = [];
 
@@ -68,14 +69,15 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     vi.mocked(getThreadMd).mockReset().mockResolvedValue({ content: 'thread rules', version: 1 });
     root = mkdtempSync(join(tmpdir(), 'octo-inbound-wiring-'));
     mkdirSync(join(root, 'instructions'));
-    stack = await startBot({
+    config = {
       botId: 'test', apiUrl: 'https://octo.example', botToken: 'test-token',
       cwd: join(root, 'workspace'), dataDir: join(root, 'data'), sdk: {},
       groupConfigDir: join(root, 'instructions'),
       rateLimit: { maxPerMinute: 100 },
       botBlocklist: ['blocked_bot'],
       context: { maxContextChars: 6000, historyLimit: 40 },
-    }, true);
+    };
+    stack = await startBot(config, true);
     await stack.connect();
     // Only the network transport is mocked. This callback is the one installed
     // by OctoGateway.createSocket, with startBot's real onInbound downstream.
@@ -295,4 +297,18 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     expect(unchangedPrompt).not.toContain('new thread rules');
     expect(unchangedOptions).not.toHaveProperty('fallbackRetryPrompt');
   });
+  it('keeps the original failure reply and one model invocation when diagnostic I/O fails', async () => {
+    config.sdk.privateDiagnostics = true;
+    writeFileSync(join(root,'data/diagnostics'),'BLOCKED');
+    const warn = vi.spyOn(console,'warn').mockImplementation(()=>{});
+    const route = vi.spyOn(stack!.router,'routeAndHandle');spies.push(warn,route);
+    vi.mocked(queryAgent).mockImplementation(async function* () {if(true)throw new Error('PRIVATE_SDK_ERROR');yield '';});
+    emit(message({channel_type:ChannelType.DM,channel_id:'human',payload:{type:MessageType.Text,content:'do work'}}));
+    await route.mock.results[0].value;
+    expect(queryAgent).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith('[codex-channel-octo] private diagnostics unavailable');
+    expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('模型处理未完成');
+    expect(JSON.stringify(vi.mocked(sendMessage).mock.calls)).not.toContain('PRIVATE_SDK_ERROR');
+  });
+
 });

@@ -213,3 +213,7 @@ After checking the prior task's effects, the **registered Octo owner** can recov
 ```
 
 The pause notice includes the exact turn ID. In groups, @mention the bot before the command. A wrong ID, non-owner, or still-running local handler cannot release the pause. Recovery never replays the old task or clears history. Ordinary transport, mention and rate limits still apply. Optional `sdk.recovery` is disabled by default and only retries positively established pre-execution temporary failures. See [the detailed recovery and offline maintenance guide](docs/issue-26-safe-recovery.md).
+
+### Private operator diagnostics (opt-in)
+
+Set `sdk.privateDiagnostics: true` to retain local failure metadata correlated with task IDs. SDK message text is fingerprinted, never stored; public replies remain unchanged. Records use owner-only rotated files (three files of at most 1 MiB each). See [privacy, rotation, and interpretation](docs/private-diagnostics.md).
