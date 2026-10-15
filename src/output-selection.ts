@@ -22,8 +22,8 @@
  * Selection table (top-down; the first non-empty result wins):
  *  - R1 `phase`: known `final_answer` messages of `S`.
  *  - Mode final then keeps the last non-commentary item (or last commentary
- *    fallback), unless the substantive-loss guard retains non-commentary parts.
- *    Partial, commentary and guarded fallbacks have distinct diagnostic sources.
+ *    fallback), regardless of earlier message lengths.
+ *    Partial and commentary fallbacks have distinct diagnostic sources.
  *  - R2 `trailing` (mode `heuristic` only; requires `S = P` and a completed
  *    turn): non-commentary messages of `S` whose first-sight seq is greater than
  *    the first-sight seq of the last work item of `F`. Abandoned for R3 when a
@@ -67,8 +67,6 @@ export type SelectionSource =
   | 'phase'
   | 'last_message'
   | 'last_message_partial'
-  | 'substantive_guard'
-  | 'substantive_guard_partial'
   | 'commentary_last'
   | 'commentary_last_partial'
   | 'trailing'
@@ -93,7 +91,7 @@ export interface SelectedOutput {
   artifacts: ReadonlyArray<never>;
 }
 
-/** Length floor of the substantive-loss guard (final and R2). */
+/** Length floor of the substantive-loss guard (R2 only). */
 export const SUBSTANTIVE_GUARD_MIN_CHARS = 400;
 
 const JOIN = '\n\n';
@@ -253,17 +251,12 @@ export class OutputCollector {
 
     // Exec JSONL 0.142/0.162 omits phase. This is an explicit ordering
     // fallback, not inferred provider intent. Preserve explicit multipart finals
-    // above; retain unlabeled parts only when the loss guard detects a large drop.
+    // above. Length cannot distinguish progress from an earlier answer; never
+    // restore unknown messages just because they are longer than the last item.
     if (opts.mode === 'final') {
       const last = nonComm.at(-1);
       const partial = pool === 'lineage' || F.terminal !== 'completed';
       if (last) {
-        const threshold = Math.max(SUBSTANTIVE_GUARD_MIN_CHARS, 2 * last.text.length);
-        if (nonComm.some(m => m !== last && m.text.length > threshold)) {
-          const source = partial || nonComm.some(m => m.phase === 'partial_answer')
-            ? 'substantive_guard_partial' : 'substantive_guard';
-          return this.finish(nonComm, source, pool, eligibleCount, opts.maxChars, JOIN);
-        }
         const source = partial || last.phase === 'partial_answer'
           ? 'last_message_partial' : 'last_message';
         return this.finish([last], source, pool, eligibleCount, opts.maxChars, JOIN);

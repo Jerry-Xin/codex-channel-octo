@@ -355,7 +355,7 @@ describe('unlabeled SDK events through default output selection', () => {
   it.each([false, true])('excludes progress (tool boundary=%s)', async withTool => {
     scriptedRuns = [async function* () {
       yield started('thread');
-      yield msg('progress', 'I will inspect the code.');
+      yield msg('progress', 'I will inspect the code. '.repeat(500));
       if (withTool) yield item('tool', 'command_execution', 'completed', { command: 'true' });
       yield msg('answer', 'The fix is complete.');
       yield turnDone;

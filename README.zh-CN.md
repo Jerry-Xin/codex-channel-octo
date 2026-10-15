@@ -100,7 +100,7 @@ npm install -g @mininglamp-oss/codex-channel-octo
 | `heuristic`（需显式开启） | 只保留本轮最后一次工具调用 / 命令 / 文件修改之后的消息；本轮未正常结束或会丢弃较长的前序消息时，回退为发送全部消息。这是基于顺序的启发式，并非最终回答信号。 |
 | `legacy`（回滚） | 旧行为：最后一次运行的全部消息直接拼接，不加分隔。 |
 
-**默认行为变更：** 未设置 `sdk.outputSelection` 时现在使用 `final`。显式设置的 `phase`、`heuristic`、`legacy` 保持原行为。Codex exec JSONL 0.142.3/0.162.1 不输出 phase，因此默认日志通常为 `source=last_message`。没有标记的多段回答可能丢失前段；需要保留它们时显式选择 `phase`。有明确标记的多段最终回答仍全部保留。同一 item 的快照覆盖不改变首次出现顺序，空白消息不会覆盖有效回答。中断或恢复继承的回退记录为 `last_message_partial`，不能据此声称任务完成。详见[源码分析和策略说明](docs/final-output-policy.md)。
+**默认行为变更：** 未设置 `sdk.outputSelection` 时现在使用 `final`。显式设置的 `phase`、`heuristic`、`legacy` 保持原行为。Codex exec JSONL 0.142.3/0.162.1 不输出 phase，因此默认日志通常为 `source=last_message`。不再按前文长度恢复并拼接消息。没有标记的多段回答可能丢失前段（包括末条只是简短结束语的情况）；需要保留它们时显式选择 `phase`。有明确标记的多段最终回答仍全部保留。同一 item 的快照覆盖不改变首次出现顺序，空白消息不会覆盖有效回答。中断或恢复继承的回退记录为 `last_message_partial`，不能据此声称任务完成。详见[源码分析和策略说明](docs/final-output-policy.md)。
 
 流中断恢复后若恢复运行没有产生消息，会改用被中断那次运行的消息，其中可能包含过程说明。
 

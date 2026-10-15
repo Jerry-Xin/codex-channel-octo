@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`sdk.outputSelection`** (`final` default; `phase`, `heuristic` and `legacy`
   compatibility modes) selects one reply shared by delivery and stored history.
   Explicit final parts are preserved. Without labels, the last useful message
-  is selected, with a substantive-loss guard against short trailing sign-offs.
+  is selected regardless of earlier message lengths, preventing long progress
+  narration from being restored before a short answer. Unlabeled multipart
+  answers may lose earlier parts; explicit compatibility modes remain available.
   Commentary and partial fallbacks have distinct diagnostics. Applied at bot
   start (restart or re-add the bot after editing).
 

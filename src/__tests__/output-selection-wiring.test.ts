@@ -183,13 +183,13 @@ describe('output selection wiring', () => {
     expect(relayInputs()).toEqual(['two']);
   });
 
-  it('keeps a substantive answer in both delivery and history before a short sign-off', async () => {
+  it('publishes and stores only the short tail after long unlabeled output', async () => {
     const config = makeConfig();
     setup(config);
     const answer = 'answer '.repeat(200);
     script([start(), m('a', 0, answer), w('tool', 1), m('b', 2, 'Done.'), end()]);
     await run(config);
-    const expected = answer + '\n\nDone.';
+    const expected = 'Done.';
     expect(relayInputs()).toEqual([expected]);
     expect(historyInputs()).toEqual([expected]);
     expect(sentContents().join('')).toBe(expected);

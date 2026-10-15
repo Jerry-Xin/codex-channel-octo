@@ -64,25 +64,24 @@ describe('default final selection without SDK phase metadata', () => {
   it('does not append commentary emitted after an unknown answer', () => {
     expect(select([start(), message('a', 'answer', 0), message('b', 'progress', 1, 'commentary'), end()]).text).toBe('answer');
   });
-  it.each([false, true])('preserves a substantive answer before a short sign-off (work=%s)', withWork => {
-    const answer = 'answer'.repeat(850);
-    const result = select([start(), message('a', answer, 0), ...(withWork ? [work] : []), message('b', 'All done.', 2), end()]);
-    expect(result).toMatchObject({ text: answer + '\n\nAll done.', source: 'substantive_guard', droppedMessageCount: 0 });
-    expect(describeSelection(result, 'final', 1)).toContain('source=substantive_guard');
+  it.each([false, true])('keeps only the short tail regardless of earlier answer length (work=%s)', withWork => {
+    const result = select([start(), message('a', 'answer'.repeat(850), 0), ...(withWork ? [work] : []), message('b', 'All done.', 2), end()]);
+    expect(result).toMatchObject({ text: 'All done.', source: 'last_message', messageIds: ['b'], droppedMessageCount: 1 });
   });
-  it('documents that long unlabeled progress can be retained before a short answer', () => {
-    const progress = 'investigating '.repeat(100);
-    const result = select([start(), message('p', progress, 0), work, message('a', '42', 2), end()]);
-    expect(result).toMatchObject({ text: progress + '\n\n42', source: 'substantive_guard' });
+  it.each([400, 401, 10000])('never restores long unlabeled progress (%s characters)', length => {
+    const result = select([start(), message('p', 'p'.repeat(length), 0), work, message('a', '42', 2), end()]);
+    expect(result).toMatchObject({ text: '42', source: 'last_message', messageIds: ['a'], droppedMessageCount: 1 });
   });
-  it('does not trigger the loss guard at the threshold, or include labeled commentary', () => {
-    expect(select([start(), message('a', 'a'.repeat(400), 0), message('b', 'done', 1), end()]).text).toBe('done');
-    expect(select([start(), message('a', 'a'.repeat(401), 0, 'commentary'), message('b', 'done', 1), end()]).text).toBe('done');
+  it('drops all five progress messages before a short final response', () => {
+    const progress = Array.from({ length: 5 }, (_, i) => message(`p${i}`, 'progress '.repeat(500), i));
+    expect(select([start(), ...progress, message('a', 'done', 5), end()]))
+      .toMatchObject({ text: 'done', messageIds: ['a'], droppedMessageCount: 5 });
   });
-  it('applies the output cap after the loss guard and preserves partial diagnostics', () => {
-    const result = select([start(), message('a', 'a'.repeat(1000), 0, 'partial_answer'), message('b', 'done', 1), end()], 'final', 50);
-    expect(result).toMatchObject({ source: 'substantive_guard_partial', truncated: true });
+  it('caps only the selected partial tail and preserves partial diagnostics', () => {
+    const result = select([start(), message('a', 'a'.repeat(1000), 0), message('b', 'answer'.repeat(20), 1, 'partial_answer'), end()], 'final', 50);
+    expect(result).toMatchObject({ source: 'last_message_partial', truncated: true, messageIds: ['b'] });
     expect(result.text).toHaveLength(50);
+    expect(result.text).not.toContain('aaaa');
   });
   it('marks explicit partial content and no-terminal fallbacks as partial', () => {
     expect(select([start(), message('a', 'partial', 0, 'partial_answer'), end()]).source).toBe('last_message_partial');
