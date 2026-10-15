@@ -4,6 +4,7 @@
     "noEmit": true
   },
   "include": [
+    "src/__tests__/delivery-ack-wiring.test.ts",
     "src/__tests__/api-diagnostics.test.ts",
     "src/__tests__/session-recovery.test.ts",
     "src/__tests__/agent-bridge-events.test.ts",

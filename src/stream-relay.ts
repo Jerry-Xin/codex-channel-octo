@@ -152,7 +152,10 @@ export interface DeliveryPart { clientMsgNo: string; state: 'confirmed' | 'unkno
 export interface DeliveryReport { parts: DeliveryPart[]; }
 function confirmedMessageId(value: unknown): string | undefined {
   const id = typeof value === 'string' ? value : typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : '';
-  return /^\d+$/.test(id) && BigInt(id) > 0n && BigInt(id) <= 9223372036854775807n ? id : undefined;
+  // parseOctoJson preserves large numeric tokens as strings, including malformed
+  // leading-zero tokens. Only canonical positive decimal int64 identities may
+  // authorize durable confirmation. Bound length before converting to BigInt.
+  return /^[1-9]\d{0,18}$/.test(id) && BigInt(id) <= 9223372036854775807n ? id : undefined;
 }
 export class StreamRelay {
   /**
