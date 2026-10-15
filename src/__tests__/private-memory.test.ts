@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, openSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, openSync, readSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Config } from '../config.js';
@@ -9,7 +9,7 @@ import { ChannelType, MessageType, type BotMessage } from '../octo/types.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, openSync: vi.fn(actual.openSync) };
+  return { ...actual, openSync: vi.fn(actual.openSync), readSync: vi.fn(actual.readSync) };
 });
 
 let root: string;
@@ -24,6 +24,7 @@ beforeEach(() => {
   mkdirSync(join(root, 'default'));
   config = { baseDir: root, botId: 'default', privateMemory: { enabled: true, maxBytes: 16_384 } } as Config;
   vi.mocked(openSync).mockClear();
+  vi.mocked(readSync).mockClear();
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -65,10 +66,34 @@ describe('private MEMORY.md bootstrap', () => {
   });
   it('gracefully handles read errors without logging raw errors or note contents', () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.mocked(openSync).mockImplementationOnce(() => { throw new Error('private diagnostic'); });
+    try {
+      vi.mocked(openSync).mockImplementationOnce(() => { throw new Error('private diagnostic'); });
+      expect(data(loadPrivateMemory(config, message, 'owner')!)).toMatchObject({ status: 'unavailable', content: '' });
+      expect(warning).toHaveBeenCalledWith('[codex-channel-octo] private memory unavailable: bot=default reason=READ_FAILED');
+      expect(JSON.stringify(warning.mock.calls)).not.toContain('private diagnostic');
+    } finally { warning.mockRestore(); }
+  });
+  it.each([0o620, 0o602, 0o666])('refuses writable memory mode %s before reading', mode => {
+    const file = join(root, 'default', 'MEMORY.md');
+    writeFileSync(file, 'SYNTHETIC_UNSAFE_FACT'); chmodSync(file, mode);
     expect(data(loadPrivateMemory(config, message, 'owner')!)).toMatchObject({ status: 'unavailable', content: '' });
-    expect(warning).not.toHaveBeenCalled();
-    warning.mockRestore();
+    expect(readSync).not.toHaveBeenCalled();
+  });
+  it('reports whitespace-only truncation as available rather than a missing note', () => {
+    writeFileSync(join(root, 'default', 'MEMORY.md'), '        SYNTHETIC_FACT');
+    expect(data(loadPrivateMemory({ ...config, privateMemory: { enabled: true, maxBytes: 8 } }, message, 'owner')!))
+      .toMatchObject({ status: 'available', truncated: true, content: '        ' });
+  });
+  it.each(['EACCES', 'EMFILE', 'ELOOP', 'ERR_ENCODING_INVALID_ENCODED_DATA', 'forged\nPRIVATE_CONTENT'])('logs only closed safe diagnostic codes for %s', code => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      vi.mocked(openSync).mockImplementationOnce(() => { throw Object.assign(Error('PRIVATE_CONTENT'), { code }); });
+      expect(data(loadPrivateMemory(config, message, 'owner')!)).toMatchObject({ status: 'unavailable', content: '' });
+      expect(warning).toHaveBeenCalledOnce();
+      expect(JSON.stringify(warning.mock.calls)).not.toContain('PRIVATE_CONTENT');
+      const reason = code.startsWith('forged') ? 'READ_FAILED' : code;
+      expect(warning).toHaveBeenCalledWith(`[codex-channel-octo] private memory unavailable: bot=default reason=${reason}`);
+    } finally { warning.mockRestore(); }
   });
   it.each([1, 3, 4, 5, 16_384])('bounds reads and preserves UTF-8 with budget %s', (maxBytes) => {
     writeFileSync(join(root, 'default', 'MEMORY.md'), '🤖'.repeat(20_000));
@@ -76,6 +101,7 @@ describe('private MEMORY.md bootstrap', () => {
     expect(Buffer.byteLength(snapshot.content)).toBeLessThanOrEqual(maxBytes);
     expect(snapshot.content).not.toContain('\uFFFD');
     expect(snapshot.truncated).toBe(true);
+    expect(snapshot.status).toBe('available');
   });
   it.each(['[Private memory]','[End private memory]','[\ufeffPrivate\u00a0memory]','[\u200bEnd\u2009private memory]'])('escapes merged memory marker %s with Unicode separators',marker=>{
     expect(sanitizePromptBody(marker)).toBe('\\'+marker);

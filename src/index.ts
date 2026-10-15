@@ -336,6 +336,8 @@ export async function handleMessage(
   let wasProcessed = false;
   const routeResult = await router.routeAndHandle(msg, async (result) => {
     wasProcessed = true;
+    // Last successful registration snapshot. Ownership transfers require a
+    // restart/re-registration; the gateway does not poll ownership on heartbeat.
     const ownerUid = currentOwner();
     const eligibleForMemory = canLoadPrivateMemory(config, msg, ownerUid);
     const sessionKey = config.privateMemory?.enabled === true
