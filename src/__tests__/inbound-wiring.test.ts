@@ -41,6 +41,7 @@ vi.mock('../agent-bridge.js', () => {
 import { startBot, type BotStack } from '../index.js';
 import { GroupContext } from '../group-context.js';
 import { SessionStore } from '../session-store.js';
+import { createAdapter } from '../db-adapter.js';
 import { queryAgent } from '../agent-bridge.js';
 import { getMentionPreference, sendMessage, getGroupMd, getThreadMd } from '../octo/api.js';
 import { WKSocket } from '../octo/socket.js';
@@ -59,6 +60,7 @@ function message(overrides: Partial<BotMessage> = {}): BotMessage {
 describe('production socket → gateway → onInbound → router wiring', () => {
   let root: string;
   let stack: BotStack | undefined;
+  let config: Parameters<typeof startBot>[0];
   let emit: (msg: BotMessage) => void;
   const spies: Array<{ mockRestore(): void }> = [];
 
@@ -68,14 +70,16 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     vi.mocked(getThreadMd).mockReset().mockResolvedValue({ content: 'thread rules', version: 1 });
     root = mkdtempSync(join(tmpdir(), 'octo-inbound-wiring-'));
     mkdirSync(join(root, 'instructions'));
-    stack = await startBot({
+    config = {
+      baseDir: root, maxResponseChars: 524288, dispatchTimeoutMs: 300000,
       botId: 'test', apiUrl: 'https://octo.example', botToken: 'test-token',
       cwd: join(root, 'workspace'), dataDir: join(root, 'data'), sdk: {},
       groupConfigDir: join(root, 'instructions'),
       rateLimit: { maxPerMinute: 100 },
       botBlocklist: ['blocked_bot'],
       context: { maxContextChars: 6000, historyLimit: 40 },
-    }, true);
+    };
+    stack = await startBot(config, true);
     await stack.connect();
     // Only the network transport is mocked. This callback is the one installed
     // by OctoGateway.createSocket, with startBot's real onInbound downstream.
@@ -87,6 +91,47 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     stack = undefined;
     for (const spy of spies.splice(0)) spy.mockRestore();
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it.each(['new task','继续上个任务'])('dispatches %s after a failed runner stops, with interruption context and no replay', async content => {
+    const route=vi.spyOn(stack!.router,'routeAndHandle');spies.push(route);
+    const stopped={waitForStopped:vi.fn().mockResolvedValue(true),dispose:vi.fn()};
+    vi.mocked(queryAgent).mockImplementationOnce(async function* (_message,_config,_ctx,_tools,options) {
+      options?.onManagedExecution?.(stopped);
+      throw new Error('synthetic SDK failure');
+    });
+    const inbound=message({channel_type:ChannelType.DM,channel_id:'human',payload:{type:MessageType.Text,content:'original task'}});
+    emit(inbound);await route.mock.results[0].value;
+    expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('模型处理未完成');
+    vi.mocked(queryAgent).mockImplementationOnce(async function* (_message,_config,_ctx,_tools,options) {
+      expect(options?.interruptedTurn).toMatchObject({reason:'failed',stage:'inference',executionRisk:'unknown'});
+      yield 'new response';
+    });
+    emit({...inbound,message_id:'second',message_seq:2,payload:{type:MessageType.Text,content}});
+    await route.mock.results[1].value;
+    expect(queryAgent).toHaveBeenCalledTimes(2);expect(stopped.waitForStopped).toHaveBeenCalledOnce();
+    expect(vi.mocked(queryAgent).mock.calls[1][0]).toContain(content);
+    expect(vi.mocked(sendMessage).mock.calls.some(call=>call[0].content==='new response')).toBe(true);
+  });
+
+  it.each(['/help','/config','/reset'])('preserves interruption context through %s until model presentation',async command=>{
+    const route=vi.spyOn(stack!.router,'routeAndHandle');spies.push(route);
+    const stopped={waitForStopped:vi.fn().mockResolvedValue(true),dispose:vi.fn()};
+    vi.mocked(queryAgent).mockImplementationOnce(async function* (_m,_c,_s,_t,options){
+      options?.onManagedExecution?.(stopped);throw Error('synthetic failure');
+    });
+    const inbound=message({channel_type:ChannelType.DM,channel_id:'human',payload:{type:MessageType.Text,content:'original task'}});
+    emit(inbound);await route.mock.results[0].value;
+    const store=new SessionStore(createAdapter(join(root,'data','cc-octo.db')));store.init();
+    spies.push({mockRestore:()=>store.close()});
+    const snapshot=store.getInterruption('human');expect(snapshot).toMatchObject({reason:'failed',executionRisk:'unknown',stage:'inference'});
+    store.setSdkSessionId('human','old-sdk-thread');
+    emit({...inbound,message_id:'command',message_seq:2,payload:{type:MessageType.Text,content:command}});await route.mock.results[1].value;
+    expect(queryAgent).toHaveBeenCalledTimes(1);expect(store.getInterruption('human')).toEqual(snapshot);
+    if(command==='/reset')expect(store.getSdkSessionId('human')).toBeUndefined();
+    vi.mocked(queryAgent).mockImplementationOnce(async function* (_m,_c,_s,_t,options){expect(options?.interruptedTurn).toEqual(snapshot);yield 'following response';});
+    emit({...inbound,message_id:'next',message_seq:3,payload:{type:MessageType.Text,content:'new task'}});await route.mock.results[2].value;
+    expect(queryAgent).toHaveBeenCalledTimes(2);expect(store.getInterruption('human')).toBeUndefined();
   });
 
   it.each([true, false])('immediately invalidates a self-authored toggle (previously %s) without caching or dispatching it', async (effective) => {
@@ -295,4 +340,18 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     expect(unchangedPrompt).not.toContain('new thread rules');
     expect(unchangedOptions).not.toHaveProperty('fallbackRetryPrompt');
   });
+  it('keeps the original failure reply and one model invocation when diagnostic I/O fails', async () => {
+    config.sdk.privateDiagnostics = true;
+    writeFileSync(join(root,'data/diagnostics'),'BLOCKED');
+    const warn = vi.spyOn(console,'warn').mockImplementation(()=>{});
+    const route = vi.spyOn(stack!.router,'routeAndHandle');spies.push(warn,route);
+    vi.mocked(queryAgent).mockImplementation(async function* () {if(true)throw new Error('PRIVATE_SDK_ERROR');yield '';});
+    emit(message({channel_type:ChannelType.DM,channel_id:'human',payload:{type:MessageType.Text,content:'do work'}}));
+    await route.mock.results[0].value;
+    expect(queryAgent).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith('[codex-channel-octo] private diagnostics unavailable');
+    expect(vi.mocked(sendMessage).mock.calls.at(-1)?.[0].content).toContain('模型处理未完成');
+    expect(JSON.stringify(vi.mocked(sendMessage).mock.calls)).not.toContain('PRIVATE_SDK_ERROR');
+  });
+
 });

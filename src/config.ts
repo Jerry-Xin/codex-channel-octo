@@ -129,6 +129,8 @@ export interface Config {
     toolProgress?: boolean;
     /** Bounded pre-execution recovery. Default disabled. */
     recovery?: RecoveryConfig;
+    /** Opt-in local failure metadata/fingerprints; never raw SDK or tool text. */
+    privateDiagnostics?: boolean;
     /**
      * How the user-facing reply is selected from a turn's agent messages:
      * - `final` (default): all explicitly labeled final parts, otherwise the last
@@ -195,10 +197,10 @@ export interface Config {
   /**
    * Per-message dispatch timeout in ms (#141). Bounds the full handler
    * pipeline (agent query + stream) under the per-session lock. If a turn
-   * hangs past this, the session lock is released (a hung turn would otherwise
-   * block every subsequent message on that session forever) and the user gets
-   * a one-shot apology. Does NOT cancel the in-flight turn — only unblocks the
-   * queue. Default 5 minutes.
+   * exceeds this, cancellation revokes its output/store authority immediately.
+   * Queued new requests can start after handler settlement and managed teardown
+   * proof; missing proof retains maintenance protection. Read from the global
+   * configuration (not a per-bot override). Default 5 minutes; <=0 disables it.
    */
   dispatchTimeoutMs: number;
   botBlocklist?: string[];
@@ -737,6 +739,9 @@ function assertSdkEnums(id: string, sdk: Config['sdk']): void {
   check('webSearchMode', sdk.webSearchMode, ['disabled', 'cached', 'live']);
   check('outputSelection', sdk.outputSelection, ['final', 'phase', 'heuristic', 'legacy']);
   validateRecovery(sdk.recovery);
+  if (sdk.privateDiagnostics !== undefined && typeof sdk.privateDiagnostics !== 'boolean') {
+    throw new Error(`Bot "${id}": sdk.privateDiagnostics must be a boolean`);
+  }
 }
 
 /**

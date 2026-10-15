@@ -18,7 +18,9 @@
     "config.bot.example.json",
     "config.bot.docker.example.json",
     "docs/issue-26-safe-recovery.md",
-    "docs/final-output-policy.md"
+    "docs/final-output-policy.md",
+    "docs/private-diagnostics.md",
+    "docs/session-continuity.md"
   ],
   "repository": {
     "type": "git",
@@ -42,7 +44,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "type-check:recovery-tests": "tsc --project tsconfig.recovery-tests.json"
+    "type-check:recovery-tests": "tsc --project tsconfig.recovery-tests.json",
+    "type-check:continuity-tests": "tsc --project tsconfig.continuity-tests.json"
   },
   "dependencies": {
     "@openai/codex-sdk": "^0.142.0",
