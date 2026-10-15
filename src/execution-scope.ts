@@ -23,6 +23,7 @@ export class ExecutionScope implements ManagedExecution {
   private launchExpected = false;
   private child?: ChildProcessWithoutNullStreams;
   private childClosed = false;
+  private launchRejected = false;
   private normalExit = false;
   private server?: Server;
   private readonly sockets = new Set<Socket>();
@@ -69,7 +70,11 @@ export class ExecutionScope implements ManagedExecution {
               child.stdin.on('error', () => {});
               child.stdout.on('data', chunk => { if (!socket.destroyed && !send({ type: 'stdout', data: chunk.toString('base64') })) child.stdout.pause(); });
               child.stderr.on('data', chunk => { if (!socket.destroyed && !send({ type: 'stderr', data: chunk.toString('base64') })) child.stderr.pause(); });
-              child.once('error', () => { /* close below remains the lifecycle boundary. */ });
+              child.once('error', () => {
+                // Only the gateway's own failed spawn with no PID proves this
+                // child never started. Errors on a running child do not.
+                if (child.pid === undefined) this.launchRejected = true;
+              });
               child.once('close', (code, signal) => {
                 this.childClosed = true;
                 this.normalExit = code === 0 && !signal;
@@ -126,7 +131,7 @@ export class ExecutionScope implements ManagedExecution {
     void this.stopGroup(); // Called for interrupted work, including a CLI that exited zero.
     const deadline = performance.now() + timeoutMs;
     do {
-      if (this.childClosed && await this.groupStopped()) return true;
+      if (this.childClosed && (this.launchRejected || await this.groupStopped())) return true;
       if (performance.now() >= deadline) return false;
       await sleep(Math.min(25, Math.max(1, deadline - performance.now())));
     } while (true);

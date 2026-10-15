@@ -224,6 +224,10 @@ export class SessionRouter {
     await Promise.race([Promise.allSettled([...this.executions]), new Promise<void>(resolve => { timer = setTimeout(resolve, graceMs); })]);
     if (timer) clearTimeout(timer);
     this.lifecycleClosed = true;
+    // Settled failed turns are no longer in `turns`/`executions`. Release
+    // their socket resources without treating disposal as stopped proof.
+    for (const pending of this.pendingCleanup.values()) pending.disposeExecutions();
+    this.pendingCleanup.clear();
   }
 
   private async runHandlerWithTimeout(result: RouteResult, handler: (result: RouteResult, turn: TurnContext) => Promise<void>): Promise<void> {
@@ -245,12 +249,18 @@ export class SessionRouter {
     }).finally(async () => {
       turn.revoke();
       try {
-        if (this.lifecycleClosed) { await turn.waitForStopped(CLEANUP_WAIT_MS); return; }
+        if (this.lifecycleClosed) {
+          if (!(await turn.waitForStopped(CLEANUP_WAIT_MS))) turn.disposeExecutions();
+          return;
+        }
         const interrupted = turn.interruption ?? (turn.signal.aborted ? 'cancelled' : turn.needsReconciliation ? 'failed' : undefined);
         if (interrupted) {
           this.ledger?.recordInterruption(result.sessionKey, {turnId:turn.turnId,reason:interrupted,executionRisk:turn.executionRisk,stage:turn.stage});
           const stopped = await turn.waitForStopped(CLEANUP_WAIT_MS);
-          if (this.lifecycleClosed) return; // The owner may have closed SQLite.
+          if (this.lifecycleClosed) {
+            if (!stopped) turn.disposeExecutions();
+            return; // The owner may have closed SQLite.
+          }
           // Cleanup evidence reopens execution; it never asserts that external
           // operations rolled back, nor retries the previous user request.
           if (!stopped && !this.ledger) this.quarantined.set(result.sessionKey,turn.turnId);

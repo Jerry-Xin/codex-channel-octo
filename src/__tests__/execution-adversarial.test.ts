@@ -5,7 +5,29 @@ import { tmpdir } from 'node:os';
 import { createConnection } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
-const settings = vi.hoisted(() => ({ direct: false }));
+const settings = vi.hoisted(() => ({ direct: false, rejectedTarget: '', gatewayAttempts: 0, postLaunchError: false, rejectedCode: '', rejectedPid: undefined as number | undefined }));
+vi.mock('node:child_process', async importOriginal => {
+  const original = await importOriginal<typeof import('node:child_process')>();
+  return { ...original, spawn: ((...args: Parameters<typeof original.spawn>) => {
+    if (args[0] === process.execPath && Array.isArray(args[1]) && String(args[1][0]).endsWith('/owned-cli.mjs')) {
+      settings.gatewayAttempts++;
+      if (settings.rejectedTarget) {
+        // Fault only the gateway boundary. Keep SDK/proxy spawn and OS error
+        // events real; do not exhaust resources or change installed binaries.
+        const child = original.spawn(settings.rejectedTarget, args[1], args[2]);
+        settings.rejectedPid = child.pid;
+        child.once('error', error => { settings.rejectedCode = (error as NodeJS.ErrnoException).code ?? ''; });
+        return child;
+      }
+      if (settings.postLaunchError) {
+        const child = original.spawn(...args);
+        child.once('spawn', () => child.emit('error', Object.assign(Error('synthetic post-launch error'), { code: 'ENOENT' })));
+        return child;
+      }
+    }
+    return original.spawn(...args);
+  }) as typeof original.spawn };
+});
 vi.mock('../jsonl-proxy-path.js', () => ({ resolveJsonlProxyPath: () => settings.direct ? undefined : fileURLToPath(new URL('./fixtures/owned-proxy.mjs', import.meta.url)) }));
 vi.mock('@openai/codex-sdk', async importOriginal => {
   const original = await importOriginal<typeof import('@openai/codex-sdk')>();
@@ -35,6 +57,8 @@ import { ExecutionScope } from '../execution-scope.js';
 import { SessionRouter } from '../session-router.js';
 import { SessionStore } from '../session-store.js';
 import { createAdapter } from '../db-adapter.js';
+import type { RouteResult } from '../session-router.js';
+import type { TurnContext } from '../turn-context.js';
 import type { Config } from '../config.js';
 import { ChannelType, MessageType, type BotMessage } from '../octo/types.js';
 
@@ -42,7 +66,7 @@ let root: string;
 let store: SessionStore;
 const msg = (content: string): BotMessage => ({ message_id: content, message_seq: 1, from_uid: 'human', channel_id: 'human', channel_type: ChannelType.DM, timestamp: 0, payload: { type: MessageType.Text, content } });
 beforeEach(() => {
-  settings.direct = false;
+  settings.direct = false; settings.rejectedTarget = ''; settings.gatewayAttempts = 0; settings.postLaunchError = false; settings.rejectedCode = ''; settings.rejectedPid = undefined;
   root = mkdtempSync(join(tmpdir(), 'execution-adversarial-'));
   store = new SessionStore(createAdapter(':memory:')); store.init();
   for (const file of ['owned-cli.mjs', 'owned-proxy.mjs']) chmodSync(fileURLToPath(new URL('./fixtures/' + file, import.meta.url)), 0o755);
@@ -56,6 +80,65 @@ function config(mode: string): Config {
 }
 
 describe.skipIf(process.platform === 'win32')('admission ignores forged teardown evidence', () => {
+  it.each(['ENOENT', 'EACCES'])('reopens admission after an authoritative gateway spawn rejection (%s), without replay', async code => {
+    settings.rejectedTarget = join(root, 'rejected-executable');
+    if (code === 'EACCES') writeFileSync(settings.rejectedTarget, '#!/bin/sh\nexit 0\n', { mode: 0o600 });
+    const cfg = config('success');
+    cfg.sdk.recovery = { enabled: true, maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 };
+    const router = new SessionRouter(cfg, 'bot', 'owner', store);
+    const scopes: ExecutionScope[] = [];
+    let failure: unknown;
+    const first = vi.fn(async (_result: RouteResult, turn: TurnContext) => {
+      try {
+        for await (const event of queryAgentEvents('first', cfg, undefined, undefined, {
+          onManagedExecution: execution => { scopes.push(execution as ExecutionScope); turn.registerExecution(execution); },
+          onExecutionRisk: risk => { turn.executionRisk = risk; },
+        })) void event;
+      } catch (error) { failure = error; throw error; }
+    });
+    try {
+      await router.routeAndHandle(msg('first'), first);
+      expect(failure).toBeDefined();
+      expect(settings.gatewayAttempts).toBe(1);
+      expect(settings.rejectedCode).toBe(code);
+      expect(settings.rejectedPid).toBeUndefined();
+      expect(await scopes[0].waitForStopped(0)).toBe(true);
+      expect(store.getTurnState('human')).toBe('clean');
+      expect(store.getInterruption('human')).toMatchObject({ reason: 'failed', executionRisk: 'unknown' });
+      expect(existsSync(join(root, 'report'))).toBe(false);
+      const next = vi.fn(async () => {});
+      const result = await router.routeAndHandle(msg('next'), next);
+      expect(result?.shouldProcess).toBe(true);
+      expect(next).toHaveBeenCalledOnce();
+      expect(first).toHaveBeenCalledOnce();
+      expect(settings.gatewayAttempts).toBe(1);
+    } finally { scopes.forEach(scope => scope.dispose()); await router.stopTurns(); }
+  }, 10000);
+
+  it('does not treat an error after PID acquisition as a rejected launch', async () => {
+    settings.postLaunchError = true;
+    const cfg = config('background-success');
+    const scopes: ExecutionScope[] = [];
+    try {
+      for await (const event of queryAgentEvents('start owned fixture', cfg, undefined, undefined, {
+        onManagedExecution: execution => scopes.push(execution as ExecutionScope),
+      })) void event;
+      expect(settings.gatewayAttempts).toBe(1);
+      expect(existsSync(join(root, 'child'))).toBe(true);
+      // The CLI exited, but its ready group member is still running. The
+      // gateway error had a PID and cannot bypass independent group inspection.
+      expect(await scopes[0].waitForStopped(0)).toBe(false);
+      expect(await scopes[0].waitForStopped(4000)).toBe(true);
+    } finally {
+      for (const scope of scopes) { await scope.waitForStopped(4000); scope.dispose(); }
+      // Independent fixture cleanup also runs if a deliberately unsafe lifecycle
+      // mutation makes waitForStopped incorrectly return true.
+      if (existsSync(join(root, 'child'))) {
+        try { process.kill(Number(readFileSync(join(root, 'child'), 'utf8')), 'SIGKILL'); } catch { /* Reaped. */ }
+      }
+    }
+  }, 7000);
+
   it('correct-nonce proof cannot reopen admission while a ready owned descendant keeps writing', async () => {
     const cfg = config('forged-failure');
     const router = new SessionRouter(cfg, 'bot', 'owner', store);

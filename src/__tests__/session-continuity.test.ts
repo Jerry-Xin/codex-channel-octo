@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { createConnection } from 'node:net';
+import { ExecutionScope } from '../execution-scope.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 vi.mock('../octo/api.js', () => ({ sendMessage: vi.fn().mockResolvedValue({message_id:'1'}),getMentionPreference:vi.fn().mockResolvedValue(false) }));
@@ -115,6 +117,60 @@ describe('user-authored turns after interrupted work',()=>{
     await router.routeAndHandle(message('next'),async(_r,t)=>{t.interruptionPresented=true;});store.deleteSession('owner');
     const connection=createAdapter(join(root,'db'));
     try{expect(connection.prepare('SELECT reason,execution_risk,context_pending FROM interrupted_turns WHERE turn_id=?').get(id)).toEqual({reason:'failed',execution_risk:'effects_observed',context_pending:0});}finally{connection.close();}
+  });
+  it.skipIf(process.platform === 'win32')('disposes a failed-handshake scope on shutdown without clearing durable quarantine', async () => {
+    const scope = new ExecutionScope(join(root, 'unused-launcher.mjs'));
+    await scope.prepare();
+    scope.expectLaunch();
+    const directory = scope.environment({}).CODEX_CHANNEL_EXECUTION_DIR;
+    const socketPath = join(directory, 'control.sock');
+    const dispose = vi.spyOn(scope, 'dispose');
+    try {
+      await router.routeAndHandle(message('failed handshake'), async (_result, turn) => {
+        turn.executionRisk = 'unknown'; turn.registerExecution(scope);
+        throw Error('synthetic missing handshake');
+      });
+      expect(store.getTurnState('owner')).toBe('quarantined');
+      await new Promise<void>((resolve, reject) => {
+        const socket = createConnection(socketPath);
+        socket.once('connect', () => { socket.destroy(); resolve(); });
+        socket.once('error', reject);
+      });
+      await router.stopTurns();
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(existsSync(directory)).toBe(false);
+      await new Promise<void>((resolve, reject) => {
+        const socket = createConnection(socketPath);
+        socket.once('error', () => resolve());
+        socket.once('connect', () => { socket.destroy(); reject(Error('listener survived shutdown')); });
+      });
+      expect(store.getTurnState('owner')).toBe('quarantined');
+      expect(await scope.waitForStopped(0)).toBe(false);
+      await router.stopTurns();
+      expect(dispose).toHaveBeenCalledOnce();
+      store.close(); store = new SessionStore(createAdapter(join(root, 'db'))); store.init();
+      expect(store.getTurnState('owner')).toBe('quarantined');
+    } finally { scope.dispose(); }
+  }, 6000);
+  it.each(['handler', 'cleanup'] as const)('disposes an unconfirmed scope when late %s completion follows shutdown', async phase => {
+    let finish!: () => void;
+    const deferred = new Promise<void>(resolve => { finish = resolve; });
+    const execution = proof(false);
+    let started = false;
+    if (phase === 'cleanup') execution.waitForStopped.mockImplementation(async () => { await deferred; return false; });
+    const dispatch = router.routeAndHandle(message('late failure'), async (_result, turn) => {
+      turn.executionRisk = 'unknown'; turn.registerExecution(execution); started = true;
+      if (phase === 'handler') await deferred;
+      throw Error('synthetic late failure');
+    });
+    await vi.waitFor(() => expect(started).toBe(true));
+    if (phase === 'cleanup') await vi.waitFor(() => expect(execution.waitForStopped).toHaveBeenCalled());
+    await router.stopTurns(1);
+    await dispatch;
+    store.close(); store = new SessionStore(createAdapter(join(root, 'db'))); store.init();
+    finish();
+    await vi.waitFor(() => expect(execution.dispose).toHaveBeenCalledOnce());
+    expect(store.getTurnState('owner')).toBe('quarantined');
   });
   it('a handler finishing after shutdown cannot write through the closed ledger',async()=>{
     let finish!:()=>void;let started=false;const execution=proof();
