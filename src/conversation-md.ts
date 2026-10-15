@@ -1,3 +1,4 @@
+import { AgentFailure } from './agent-failure.js';
 import type { Config } from './config.js';
 import { getGroupMd, getThreadMd } from './octo/api.js';
 import { ChannelType, TOPIC_CHANNEL_SEPARATOR, type BotMessage } from './octo/types.js';
@@ -137,7 +138,8 @@ export class ConversationMarkdown {
         this.warnings.delete(resolved.key);
         this.warnings.set(resolved.key, Date.now() + CACHE_TTL_MS);
         if (this.warnings.size > MAX_CACHE_ENTRIES) this.warnings.delete(this.warnings.keys().next().value!);
-        const status = error instanceof Error ? /failed \((\d{3})\)/.exec(error.message)?.[1] : undefined;
+        const status = error instanceof AgentFailure ? error.snapshot.httpStatus
+          : error instanceof Error ? /failed \((\d{3})\)/.exec(error.message)?.[1] : undefined;
         const key = JSON.stringify(resolved.key).replace(/[\u0085\u2028\u2029]/g, ' ');
         console.warn(`[codex-channel-octo] Conversation markdown lookup failed for ${key} (${status ?? 'network or response error'}); server context may be stale or unavailable.`);
       }

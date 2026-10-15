@@ -9,8 +9,8 @@
  *
  * Pool eligibility (applied before the selection table):
  *  - `F` is the final attempt of the call. `P` = messages of `F`.
- *  - `L` = messages of the attempts `F` continues (stream-recovery lineage,
- *    walked through `attempt_start.continues`). Attempts with
+ *  - `L` = messages of legacy attempts `F` explicitly continues (lineage,
+ *    walked through `attempt_start.continues`; the current bridge emits null). Attempts with
  *    `continues: null` other than `F` (e.g. a stale-resume attempt replaced by
  *    a fresh retry) are never eligible.
  *  - Selection pool `S` uses useful primary messages, otherwise useful lineage

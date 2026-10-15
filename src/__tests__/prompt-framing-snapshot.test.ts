@@ -67,45 +67,16 @@ async function drain(opts?: Parameters<typeof queryAgent>[4]): Promise<void> {
   for await (const t of queryAgent('USER BODY', cfg(), undefined, undefined, opts)) void t;
 }
 
-describe('T26: prompt framing is stable with merged security guidance', () => {
-  it('initial → stale-resume fresh retry → stream recovery', async () => {
-    scriptedRuns = [
-      async function* () {
-        throw new Error('thread not found');
-      },
-      async function* () {
-        yield { type: 'thread.started', thread_id: 't2' };
-        throw new Error(interrupt);
-      },
-      async function* () {
-        yield { type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'ok' } };
-        yield { type: 'turn.completed', usage: {} };
-      },
-    ];
-    await drain({ resume: 'old', fallbackRetryPrompt: 'FALLBACK BODY', onResumeFailed: () => {} });
-    expect(prompts).toHaveLength(3);
-    const [initial, fresh, recovery] = prompts;
-    expect(initial.endsWith('\n\n---\n\n[Current message — respond to this ONLY]\nUSER BODY')).toBe(true);
-    expect(fresh.endsWith('\n\n---\n\n[Current message — respond to this ONLY]\nFALLBACK BODY')).toBe(true);
-    expect(recovery.endsWith('\n\n---\n\n[Current message — respond to this ONLY]\n上次回复因连接中断未完成。请基于你已经完成的工作，直接继续并给出最终结论，不要重复已执行过的步骤。')).toBe(true);
-    expect([sha(initial), sha(fresh), sha(recovery)]).toEqual([
-      '57331a39a9978e6c2bc5e4de7ac1465f4d1bf4914c30c3a50c9833e1b82e2488',
-      '01c42a20064a2eab0a647942f078c6ec18474d4ea9ce60f728779e9d9fdbc678',
-      'ed9c89bbc12d48ee8312bb79c9ff6434a66fe76a4b776e2de89f75391baf3cc9',
-    ]);
-  });
-
-  it('fresh retry without a fallback prompt reuses the initial prompt', async () => {
-    scriptedRuns = [
-      async function* () {
-        throw new Error('thread not found');
-      },
-      async function* () {
-        yield { type: 'turn.completed', usage: {} };
-      },
-    ];
-    await drain({ resume: 'old', onResumeFailed: () => {} });
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toBe(prompts[0]);
-  });
+describe('T26: framing keeps sender and private-memory guidance on a successful run', () => {
+ it('keeps the sender block and current-message anchor in the initial prompt',async()=>{
+  scriptedRuns=[async function*(){yield {type:'turn.completed',usage:{}};}];
+  await drain();expect(prompts).toHaveLength(1);
+  expect(prompts[0].endsWith('\n\n---\n\n[Current message — respond to this ONLY]\nUSER BODY')).toBe(true);
+  expect(sha(prompts[0])).toBe('57331a39a9978e6c2bc5e4de7ac1465f4d1bf4914c30c3a50c9833e1b82e2488');
+ });
+ it('never emits fallback or continuation prompts when execution is uncertain',async()=>{
+  scriptedRuns=[async function*(){throw new Error(interrupt);}];
+  await expect(drain({resume:'old'})).rejects.toThrow();
+  expect(prompts).toHaveLength(1);expect(prompts[0]).not.toContain('FALLBACK BODY');
+ });
 });

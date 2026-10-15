@@ -164,7 +164,7 @@ IM input is **untrusted**; the permission boundary is the **sandbox**, not the p
 
 Place an operator-maintained `MEMORY.md` beside `<baseDir>/<botId>/SOUL.md` and set `"privateMemory": { "enabled": true, "maxBytes": 16384 }` in the global or per-bot config (per-bot fields override inline/global fields). Disabled by default; `maxBytes` accepts integers from 1 to 65536. Configuration changes require a restart; eligible turns re-read the file, so note edits/deletion take effect on the next turn.
 
-Only an explicit DM with a transport sender matching the **last successful registration** `owner_uid` is eligible. Groups, topics, other senders and unknown identities cause no memory file read. The bounded snapshot is framed as untrusted JSON background in every eligible SDK run, including recovery; it is never written to shared `AGENTS.md`. Missing/unreadable files produce a safe absence/unavailability notice; file symlinks and non-regular files are rejected. This first milestone does not load `memory/` daily notes, search, write notes, or add compaction hooks.
+Only an explicit DM with a transport sender matching the **last successful registration** `owner_uid` is eligible. Groups, topics, other senders and unknown identities cause no memory file read. The bounded snapshot is framed as untrusted JSON background in every eligible SDK run, including supported pre-execution retries; uncertain stream/stale-thread failures retain the fail-closed policy and are not automatically replayed. It is never written to shared `AGENTS.md`. Missing/unreadable files produce a safe absence/unavailability notice; file symlinks and non-regular files are rejected. This first milestone does not load `memory/` daily notes, search, write notes, or add compaction hooks.
 
 When enabled, ordinary/private-memory conversations use separate namespaced histories, SDK threads and working directories. Enabling/disabling starts a different history scope for every conversation, including groups and non-owner DMs, without deleting older records; plan the rollout as a conversation-continuity reset. After a successful re-registration observes a different owner, former owners select the ordinary scope rather than their prior private-memory thread. `/reset` clears the current scope but never deletes `MEMORY.md`. Snapshots are repeated deliberately in this initial implementation; they are byte-bounded, not deduplicated across a resumed thread.
 
@@ -173,6 +173,36 @@ When enabled, ordinary/private-memory conversations use separate namespaced hist
 Files writable by a group or other users are refused (`mode & 0022`); use operator-owned mode `0600` for confidentiality as well. Non-ENOENT failures emit only a closed diagnostic code and safe bot label, never paths, note text or raw exception messages. A truncated prefix remains available even when it contains only whitespace or an incomplete UTF-8 character. Final-component symlinks are refused; parent-directory symlinks and hardlinks are not containment guarantees. Protect the directory tree externally.
 
 **Privacy boundary:** this filters adapter injection, not arbitrary filesystem access. A read-only sandbox may still permit reads outside cwd; `danger-full-access` removes filesystem isolation. A tool running as the gateway user may also overwrite the note, even if it is mode `0600`; JSON framing does not make those facts trustworthy. Do not expose private files to untrusted users without an external filesystem/container boundary. Also do not share an operator's Codex home across unrelated users: the SDK's transcript storage is outside this feature's scope.
+
+### Safe failure handling and recovery
+
+Unknown execution pauses admission across reset/restart; cancellation before SDK
+execution stays clean. New retries default off and cover only positively proven
+pre-execution temporary failures. After verifying effects, an owner whose wire
+UID **exactly matches registered owner_uid** can send:
+
+```text
+/reconcile TURN_ID --external-results-verified
+/reconcile TURN_ID --session SESSION_KEY --external-results-verified
+```
+
+Explicit targets require the owner's own DM. Exact target/turn and retained
+handler checks apply; controls never replay, resend or erase history. Successes
+and refusals are audited using hashed identities and closed outcomes.
+
+**Rewritten owner UIDs require offline maintenance.** The current API returns
+owner_channel_id equal to owner_uid; it supplies no scoped identity binding.
+Incoming UID suffixes cannot authorize controls. Startup and pause notices state
+that a differently prefixed wire UID needs an operator to verify effects, stop
+the gateway and use the [offline helper](docs/issue-26-safe-recovery.md). This may
+interrupt every bot in the supervisor. A UID registered with its prefix already
+works by exact equality. Prompt is_owner metadata is advisory, not this ACL.
+
+Quarantined traffic has its own bounded aggregate budget plus sender/session
+limits; it cannot exhaust healthy model admission or admit unlimited senders.
+Active rows retain the normal budget. Paused group chatter remains in the bounded
+context cache; control commands do not. The 300-second dispatch timeout can be
+adjusted for long tasks without waiving execution reconciliation.
 
 ### Unicode JSONL transport compatibility
 
