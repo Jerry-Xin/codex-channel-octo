@@ -24,7 +24,7 @@ describe('user-authored turns after interrupted work',()=>{
     await router.routeAndHandle(message('old task'),async(_r,t)=>{old=t;t.executionRisk=risk;t.stage='inference';t.registerExecution(execution);throw Error('synthetic failure');});
     expect(store.isTurnQuarantined('owner')).toBe(false);
     expect(store.getInterruption('owner')).toEqual({turnId:old.turnId,reason:'failed',executionRisk:risk,stage:'inference'});
-    const next=vi.fn(async r=>{expect(r.interruptedTurn?.turnId).toBe(old.turnId);});
+    const next=vi.fn(async (r,t)=>{expect(r.interruptedTurn?.turnId).toBe(old.turnId);t.interruptionPresented=true;});
     await router.routeAndHandle(message('unrelated new task'),next);
     expect(next).toHaveBeenCalledOnce();expect(execution.waitForStopped).toHaveBeenCalledOnce();expect(execution.dispose).toHaveBeenCalledOnce();
     expect(store.getInterruption('owner')).toBeUndefined();
@@ -112,7 +112,7 @@ describe('user-authored turns after interrupted work',()=>{
   });
   it('does not delete or claim external reconciliation for a consumed interruption record',async()=>{
     let id='';await router.routeAndHandle(message('first'),async(_r,t)=>{id=t.turnId;t.executionRisk='effects_observed';t.interruption='failed';t.registerExecution(proof());});
-    await router.routeAndHandle(message('next'),async()=>{});store.deleteSession('owner');
+    await router.routeAndHandle(message('next'),async(_r,t)=>{t.interruptionPresented=true;});store.deleteSession('owner');
     const connection=createAdapter(join(root,'db'));
     try{expect(connection.prepare('SELECT reason,execution_risk,context_pending FROM interrupted_turns WHERE turn_id=?').get(id)).toEqual({reason:'failed',execution_risk:'effects_observed',context_pending:0});}finally{connection.close();}
   });

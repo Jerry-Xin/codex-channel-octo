@@ -14,6 +14,8 @@ export class TurnContext {
   readonly deadline: number;
   executionRisk: ExecutionRisk = 'proven_not_started';
   needsReconciliation = false;
+  /** Set only after a model response that received interruption context commits. */
+  interruptionPresented = false;
   interruption?: InterruptedTurn['reason'];
   stage: FailureStage = 'prepare';
   private readonly managedExecutions: ManagedExecution[] = [];

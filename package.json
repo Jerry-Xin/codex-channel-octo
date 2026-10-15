@@ -41,7 +41,8 @@
     "lint": "eslint src/ --max-warnings 0",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "type-check:continuity-tests": "tsc --project tsconfig.continuity-tests.json"
   },
   "dependencies": {
     "@openai/codex-sdk": "^0.142.0",

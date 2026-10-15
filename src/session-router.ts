@@ -260,7 +260,7 @@ export class SessionRouter {
         } else {
           turn.disposeExecutions();
           this.ledger?.finishTurn(result.sessionKey,turn.turnId,'clean');
-          if (result.interruptedTurn) this.ledger?.consumeInterruption(result.sessionKey,result.interruptedTurn.turnId);
+          if (turn.interruptionPresented && result.interruptedTurn) this.ledger?.consumeInterruption(result.sessionKey,result.interruptedTurn.turnId);
         }
       } finally {
         this.executions.delete(settled); this.turns.delete(turn);

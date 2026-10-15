@@ -474,8 +474,13 @@ export async function* queryAgentEvents(
     const scope = opts?.onManagedExecution ? new ExecutionScope() : undefined;
     attemptScope = scope;
     if (scope) opts?.onManagedExecution?.(scope);
-    const baseEnv = env ?? Object.fromEntries(Object.entries(process.env).filter((pair): pair is [string,string] => pair[1] !== undefined));
-    const client = codex ?? new Codex({ ...codexOptions, env: scope!.environment(baseEnv) });
+    const baseEnv = { ...(env ?? Object.fromEntries(Object.entries(process.env).filter((pair): pair is [string,string] => pair[1] !== undefined))) };
+    delete baseEnv.CODEX_CHANNEL_EXECUTION_DIR; delete baseEnv.CODEX_CHANNEL_EXECUTION_TOKEN;
+    const managedProxy = scope && codexOptions.codexPathOverride && process.platform !== 'win32';
+    if (managedProxy) await scope.prepare();
+    // Direct launch has no gateway-owned process handle. Never send it control
+    // fields or infer stopped from a file it could write itself.
+    const client = codex ?? new Codex({ ...codexOptions, env: managedProxy ? scope!.environment(baseEnv) : baseEnv });
     yield { kind: 'attempt_start', attempt, reason: attemptCtx.reason, continues: attemptCtx.continues };
     const thread = resumeId
       ? client.resumeThread(resumeId, threadOpts)

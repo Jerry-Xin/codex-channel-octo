@@ -4,6 +4,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 vi.mock('../jsonl-proxy-path.js',()=>({resolveJsonlProxyPath:()=>fileURLToPath(new URL('./fixtures/owned-proxy.mjs',import.meta.url))}));
+vi.mock('../execution-scope.js',async importOriginal=>{
+  const original=await importOriginal<typeof import('../execution-scope.js')>();
+  return {...original,ExecutionScope:class extends original.ExecutionScope {constructor(){super(fileURLToPath(new URL('./fixtures/owned-cli.mjs',import.meta.url)));}}};
+});
 import { queryAgentEvents, interruptionContext } from '../agent-bridge.js';
 import { TurnFailure } from '../agent-failure.js';
 import type { ManagedExecution } from '../execution-scope.js';
@@ -24,9 +28,19 @@ describe('interruption context boundaries',()=>{
   });
 });
 describe.skipIf(process.platform==='win32')('real SDK → bridge → owned proxy',()=>{
+  it('preserves managed Unicode JSONL and environment content',async()=>{
+    const scopes:ManagedExecution[]=[];
+    const text='中文\u2028🧪\u2029';
+    const config:Config={baseDir:root,cwd:root,dataDir:join(root,'data'),botToken:'fake',apiUrl:'https://test.invalid',rateLimit:{maxPerMinute:100},context:{maxContextChars:6000,historyLimit:40},maxResponseChars:524288,dispatchTimeoutMs:10000,sdk:{env:{OWNED_UNICODE:text}}};
+    const events=[];
+    try{for await(const event of queryAgentEvents('测试',config,undefined,undefined,{onManagedExecution:scope=>scopes.push(scope)}))events.push(event);
+      expect(events.filter(event=>event.kind==='message')).toMatchObject([{text}]);
+      expect(await scopes[0].waitForStopped(1000)).toBe(true);
+    }finally{scopes.forEach(scope=>scope.dispose());}
+  });
   it('confirms a failed process stopped and frames an explicit user continuation once',async()=>{
     const scopes:ManagedExecution[]=[];const promptFile=join(root,'prompt');
-    const config={cwd:root,cwdBase:root,sdk:{sandboxMode:'read-only',env:{OWNED_MODE:'failure',OWNED_PROMPT_FILE:promptFile}}} as Config;
+    const config:Config={baseDir:root,cwd:root,cwdBase:root,dataDir:join(root,'data'),botToken:'fake',apiUrl:'https://test.invalid',rateLimit:{maxPerMinute:100},context:{maxContextChars:6000,historyLimit:40},maxResponseChars:524288,dispatchTimeoutMs:10000,sdk:{sandboxMode:'read-only',env:{OWNED_MODE:'failure',OWNED_PROMPT_FILE:promptFile}}};
     const options={onManagedExecution:(scope:ManagedExecution)=>{scopes.push(scope);}};
     let failure:unknown;
     try{for await(const event of queryAgentEvents('original request',config,undefined,undefined,options))void event;}catch(error){failure=error;}

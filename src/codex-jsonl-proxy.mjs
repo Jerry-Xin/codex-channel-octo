@@ -3,21 +3,10 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
-import { realpathSync, writeFileSync, renameSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-
-function acknowledgeStopped() {
-  const directory = process.env.CODEX_CHANNEL_EXECUTION_DIR;
-  const token = process.env.CODEX_CHANNEL_EXECUTION_TOKEN;
-  if (!directory || !token) return;
-  try {
-    const temporary = join(directory, `status-${randomUUID()}.tmp`);
-    writeFileSync(temporary, JSON.stringify({ token, state: 'stopped' }), { flag: 'wx', mode: 0o600 });
-    renameSync(temporary, join(directory, 'status.json'));
-  } catch { /* Missing proof keeps the session blocked; no raw diagnostics. */ }
-}
 
 // Only inspect/signal the group created by this proxy, never the gateway group.
 function groupStopped(pid) {
@@ -36,7 +25,67 @@ export function escapeJsonlSeparators(text) {
   return text.replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 }
 
+// Managed mode is only a transport. The gateway launches/tracks the CLI and
+// independently checks its group; this proxy cannot attest that work stopped.
+function runManagedProxy(args) {
+  const socket = createConnection(join(process.env.CODEX_CHANNEL_EXECUTION_DIR, 'control.sock'));
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+  let ended = false;
+  const send = value => socket.write(JSON.stringify(value) + '\n');
+  const cancel = () => {
+    // This transport may exit before teardown: the gateway owns the child and
+    // independently keeps admission closed. Do not wait on a blocked stdout.
+    process.stdin.pause();
+    if (socket.destroyed) { process.exit(1); return; }
+    socket.end(JSON.stringify({ type: 'cancel' }) + '\n', () => process.exit(1));
+    setTimeout(() => process.exit(1), 500).unref();
+  };
+  const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  signals.forEach(signal => process.on(signal, cancel));
+  process.stdin.pause();
+  socket.once('connect', () => {
+    send({ token: process.env.CODEX_CHANNEL_EXECUTION_TOKEN, args, env: process.env });
+    process.stdin.on('data', data => { if (!send({ type: 'stdin', data: data.toString('base64') })) process.stdin.pause(); });
+    process.stdin.once('end', () => send({ type: 'end' }));
+    process.stdin.resume();
+  });
+  socket.on('drain', () => process.stdin.resume());
+  process.stdout.on('drain', () => socket.resume());
+  process.stderr.on('drain', () => socket.resume());
+  const finish = code => {
+    if (ended) return;
+    ended = true;
+    process.stdin.pause();
+    signals.forEach(signal => process.removeListener(signal, cancel));
+    socket.destroy();
+    process.stdout.write(escapeJsonlSeparators(decoder.end()));
+    process.exitCode = code;
+  };
+  process.stdout.on('error', () => { cancel(); finish(1); });
+  socket.on('error', () => finish(1));
+  socket.on('close', () => finish(1));
+  socket.on('data', data => {
+    buffer += data.toString('utf8');
+    for (let end; (end = buffer.indexOf('\n')) !== -1;) {
+      const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+      try {
+        const frame = JSON.parse(line);
+        if (frame.type === 'stdout') {
+          if (!process.stdout.write(escapeJsonlSeparators(decoder.write(Buffer.from(frame.data, 'base64'))))) socket.pause();
+        } else if (frame.type === 'stderr') {
+          if (!process.stderr.write(Buffer.from(frame.data, 'base64'))) socket.pause();
+        } else if (frame.type === 'exit') finish(Number.isInteger(frame.code) ? frame.code : 1);
+        else finish(1);
+      } catch { finish(1); }
+    }
+  });
+}
+
 export function runCodexJsonlProxy(launcher, args) {
+  if (process.env.CODEX_CHANNEL_EXECUTION_DIR && process.env.CODEX_CHANNEL_EXECUTION_TOKEN && process.platform !== 'win32') {
+    runManagedProxy(args); return;
+  }
   const env = { ...process.env };
   // Neither credentials for teardown nor its control path reach model tools.
   delete env.CODEX_CHANNEL_EXECUTION_DIR;
@@ -89,7 +138,7 @@ export function runCodexJsonlProxy(launcher, args) {
     process.stdin.pause();
     signals.forEach((name, index) => process.removeListener(name, handlers[index]));
     // A failed/cancelled parent may leave children with redirected stdio. Drain
-    // those owned processes too before acknowledging interruption cleanup.
+    // those owned processes too before exiting after interrupted cleanup.
     if (cancelled || code !== 0 || signal) {
       signalGroup('SIGTERM');
       const deadline = Date.now() + 1500;
@@ -98,7 +147,7 @@ export function runCodexJsonlProxy(launcher, args) {
       const killDeadline = Date.now() + 500;
       while (!groupStopped(child.pid) && Date.now() < killDeadline) await sleep(25);
     }
-    if (groupStopped(child.pid)) acknowledgeStopped();
+
     if (cancelled) {
       if (signal) process.kill(process.pid, signal);
       else process.exit(code ?? 1);
@@ -113,7 +162,6 @@ export function startCodexJsonlProxy(args = process.argv.slice(2)) {
     const sdkRequire = createRequire(import.meta.resolve('@openai/codex-sdk'));
     runCodexJsonlProxy(sdkRequire.resolve('@openai/codex/bin/codex.js'), args);
   } catch {
-    acknowledgeStopped(); // Bootstrap failed before any CLI process was started.
     process.stdout.write(JSON.stringify({ type: 'error', message: 'CODEX_JSONL_PROXY_BOOTSTRAP_FAILURE: reinstall dependencies and run npm run build' }) + '\n');
     process.exitCode = 1;
   }

@@ -819,6 +819,7 @@ export async function handleMessage(
         stage = 'history_commit'; turn.stage = stage;
         turn.assertPublishable();
         turnStore.commitTurnOutput(turn.turnId);
+        turn.interruptionPresented = !!result.interruptedTurn;
         // G10: mark this message_seq as the last one we replied to. Next turn's
         // segmented history will treat messages with seq <= this as [answered].
         // #115: a synthetic cron fire carries message_seq=0 (no real wire seq);
