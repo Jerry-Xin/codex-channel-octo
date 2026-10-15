@@ -29,6 +29,8 @@ const TYPING_INTERVAL_MS = 5_000;
 /** Maximum characters per message segment. */
 const MAX_SEGMENT_CHARS = 3_500;
 
+const UUID_MESSAGE_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 /**
  * Acknowledgement IDs must be canonical positive int64 text, an ASCII opaque
  * name (letter/underscore first, then letters/digits/underscore/hyphen; ≤128
@@ -40,9 +42,8 @@ function isUsableMessageId(id: unknown): id is string {
   if (/^[1-9][0-9]{0,18}$/.test(id)) {
     return BigInt(id) <= 9223372036854775807n;
   }
-  if (id === "NaN" || id === "Infinity") return false;
-  return /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(id)
-    || /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id);
+  if (/^(nan|inf|infinity)$/i.test(id)) return false;
+  return UUID_MESSAGE_ID.test(id) || /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(id);
 }
 
 // ─── Message Splitting ─────────────────────────────────────────────────────
@@ -183,6 +184,7 @@ export class StreamRelay {
   ): Promise<DeliveryReport> {
     let expected = 0;
     const messageIds: string[] = [];
+    const messageIdKeys = new Set<string>();
     // --- Typing heartbeat ---
     const typingParams = { apiUrl, botToken, channelId, channelType };
     // Fire one immediately — don't wait for the first interval tick.
@@ -291,9 +293,15 @@ export class StreamRelay {
             // segment. Require its request identity and a unique usable ID.
             // Keep IDs as returned strings, including int64-safe REST values.
             if (isUsableMessageId(result?.message_id)
-              && result.client_msg_no === clientMsgNo
-              && !messageIds.includes(result.message_id)) {
-              messageIds.push(result.message_id);
+              && result.client_msg_no === clientMsgNo) {
+              // UUID case aliases share an identity, including letter-first
+              // UUIDs that also match the case-sensitive opaque grammar.
+              const key = UUID_MESSAGE_ID.test(result.message_id)
+                ? result.message_id.toLowerCase() : result.message_id;
+              if (!messageIdKeys.has(key)) {
+                messageIdKeys.add(key);
+                messageIds.push(result.message_id);
+              }
             }
           } catch (err) {
             console.error(`[stream-relay] sendMessage failed for segment (${segment.length} chars), continuing: ${summarizeAgentError(err)}`);

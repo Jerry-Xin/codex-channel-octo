@@ -158,6 +158,51 @@ describe("correlated delivery report", () => {
     assertReport(await deliver(parts.join("")), 3, ["1", "2"]);
     assertAttempts(parts);
   });
+  it.each(["nan", "NAN", "Nan", "nAN", "NaN", "infinity", "INFINITY", "iNfInItY", "Infinity", "inf", "INF", "Inf"])(
+    "rejects whole-token reserved identity %s regardless of case", async id => {
+      reply = b => Response.json({ message_id: id, client_msg_no: b.client_msg_no });
+      assertReport(await deliver(parts.join("")), 3, []);
+      assertAttempts(parts);
+    });
+  it.each(["_nan", "nan_", "nan1", "NaNa", "naN-x", "Infinity-1", "inf1"])(
+    "retains legitimate opaque identity %s", async id => {
+      reply = b => Response.json({ message_id: id, client_msg_no: b.client_msg_no });
+      assertReport(await deliver("Answer."), 1, [id]);
+      assertAttempts(["Answer."]);
+    });
+  it.each([["Msg_a", "msg_A", "Msg_a"], ["msg_A", "Msg_a", "msg_A"]])(
+    "keeps opaque case aliases distinct and exact duplicates unconfirmed %j/%j/%j", async (...ids) => {
+      reply = (b, i) => Response.json({ message_id: ids[i], client_msg_no: b.client_msg_no });
+      assertReport(await deliver(parts.join("")), 3, ids.slice(0, 2));
+      assertAttempts(parts);
+    });
+  const uuidSpellings = ["12345678", "abcdef12"].map(prefix => [
+    `${prefix}-abcd-4abc-8abc-123456789abc`,
+    `${prefix}-AbCd-4aBc-8AbC-123456789aBc`,
+    `${prefix}-aBcD-4AbC-8aBc-123456789AbC`,
+    `${prefix}-ABcd-4ABc-8abC-123456789ABc`,
+    `${prefix.toUpperCase()}-ABCD-4ABC-8ABC-123456789ABC`,
+  ]);
+  it.each(uuidSpellings.flatMap(ids => [{ ids }, { ids: [...ids].reverse() }]))(
+    "deduplicates UUID semantic aliases, preserving the first spelling: $ids", async ({ ids }) => {
+      const segments = ids.map(() => "X".repeat(3500));
+      reply = (b, i) => Response.json({ message_id: ids[i], client_msg_no: b.client_msg_no });
+      assertReport(await deliver(segments.join("")), ids.length, [ids[0]!]);
+      assertAttempts(segments);
+    });
+  it.each(uuidSpellings.map(ids => ({ ids })))(
+    "retains confirmation order around UUID aliases: $ids", async ({ ids }) => {
+      const returned = [ids[1]!, "Msg_a", ids[4]!];
+      reply = (b, i) => Response.json({ message_id: returned[i], client_msg_no: b.client_msg_no });
+      assertReport(await deliver(parts.join("")), 3, returned.slice(0, 2));
+      assertAttempts(parts);
+    });
+  it("does not reserve a UUID key for an uncorrelated response", async () => {
+    const ids = uuidSpellings[0]!;
+    reply = (b, i) => Response.json({ message_id: ids[i], client_msg_no: i === 0 ? "other-request" : b.client_msg_no });
+    assertReport(await deliver(parts.join("")), 3, [ids[1]!]);
+    assertAttempts(parts);
+  });
   it("keeps legitimate empty output separate from an acknowledged empty notice", async () => {
     assertReport(await deliver(""), 0, []);
     assertAttempts([]);
