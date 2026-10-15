@@ -128,7 +128,10 @@ export interface Config {
     toolProgress?: boolean;
     /**
      * How the user-facing reply is selected from a turn's agent messages:
-     * - `phase` (default): known final answers when the runtime labels them,
+     * - `final` (default): all explicitly labeled final parts, otherwise the last
+     *   useful non-commentary item regardless of earlier message lengths.
+     *   Ordering fallback, not a final signal.
+     * - `phase` (compatibility): known final answers when the runtime labels them,
      *   otherwise every message not known to be commentary, joined with a
      *   blank line. SDK/CLI 0.142.3 labels nothing, so commentary is still
      *   delivered.
@@ -729,7 +732,7 @@ function assertSdkEnums(id: string, sdk: Config['sdk']): void {
   check('approvalPolicy', sdk.approvalPolicy, ['never', 'on-request', 'on-failure', 'untrusted']);
   check('modelReasoningEffort', sdk.modelReasoningEffort, ['minimal', 'low', 'medium', 'high', 'xhigh']);
   check('webSearchMode', sdk.webSearchMode, ['disabled', 'cached', 'live']);
-  check('outputSelection', sdk.outputSelection, ['phase', 'heuristic', 'legacy']);
+  check('outputSelection', sdk.outputSelection, ['final', 'phase', 'heuristic', 'legacy']);
 }
 
 /**

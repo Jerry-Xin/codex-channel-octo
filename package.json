@@ -16,7 +16,8 @@
     "LICENSE",
     "config.example.json",
     "config.bot.example.json",
-    "config.bot.docker.example.json"
+    "config.bot.docker.example.json",
+    "docs/final-output-policy.md"
   ],
   "repository": {
     "type": "git",
