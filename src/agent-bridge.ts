@@ -443,7 +443,7 @@ export async function* queryAgentEvents(
       if (config.sdk.privateDiagnostics === true && config.sdk.privateDiagnosticsDetails === true
         && !utilTypes.isProxy(error) && utilTypes.isNativeError(error)) {
         const message: unknown = Object.getOwnPropertyDescriptor(error, 'message')?.value;
-        rememberSdkFailure(error,'exception',message,{detailed:true,text:config.sdk.privateDiagnosticsText === true,fields:error,eventSubtype:'exception',
+        rememberSdkFailure(error,'exception',message,{detailed:true,fields:error,eventSubtype:'exception',
           run:{mode:opts?.resume ? 'resume' : 'start',attempt:0,resumeId:opts?.resume}});
       }
     } catch { /* Diagnostic trouble must never replace the construction error. */ }
@@ -490,29 +490,10 @@ export async function* queryAgentEvents(
     // stays in the private WeakMap and has no classification/retry authority.
     const original = new Error(message);
     if (config.sdk.privateDiagnostics === true) rememberSdkFailure(original,event,message, {
-      detailed:config.sdk.privateDiagnosticsDetails === true, text:config.sdk.privateDiagnosticsText === true, fields, eventSubtype, run:diagnosticRun,
+      detailed:config.sdk.privateDiagnosticsDetails === true, fields, eventSubtype, run:diagnosticRun,
     });
     return inheritSdkDiagnostic(new AgentFailure(classifyFailure(original, 'sdk_event')), original);
   };
-
-  // Only SDK call/iterator boundaries may opt into text. The outer recovery
-  // catch also sees operator callbacks, local preparation and abort reasons.
-  const rememberSdkException = (error: unknown): void => {
-    if (config.sdk.privateDiagnostics !== true || config.sdk.privateDiagnosticsDetails !== true
-      || config.sdk.privateDiagnosticsText !== true || opts?.signal?.aborted) return;
-    try {
-      if (!utilTypes.isProxy(error) && utilTypes.isNativeError(error)) {
-        const message: unknown = Object.getOwnPropertyDescriptor(error, 'message')?.value;
-        rememberSdkFailure(error,'exception',message,{detailed:true,text:true,fields:error,eventSubtype:'exception',run:diagnosticRun});
-      }
-    } catch { /* Diagnostics cannot replace the original SDK exception. */ }
-  };
-  const sdkCall = <T>(call: () => T): T => {
-    try { return call(); } catch (error) { rememberSdkException(error); throw error; }
-  };
-  async function* sdkEvents(events: AsyncIterable<ThreadEvent>): AsyncIterable<ThreadEvent> {
-    try { yield* events; } catch (error) { rememberSdkException(error); throw error; }
-  }
 
   // Drain one CLI execution; track positive effects independently from absence
   // of events. Only an actual OS spawn rejection can prove non-execution.
@@ -532,20 +513,16 @@ export async function* queryAgentEvents(
     if (managedProxy) await scope.prepare();
     // Direct launch has no gateway-owned process handle. Never send it control
     // fields or infer stopped from a file it could write itself.
-    const clientOptions = { ...codexOptions, env: managedProxy ? scope!.environment(baseEnv) : baseEnv };
-    const client = codex ?? sdkCall(() => new Codex(clientOptions));
+    const client = codex ?? new Codex({ ...codexOptions, env: managedProxy ? scope!.environment(baseEnv) : baseEnv });
     yield { kind: 'attempt_start', attempt, reason: attemptCtx.reason, continues: attemptCtx.continues };
-    const thread = sdkCall(() => resumeId
+    const thread = resumeId
       ? client.resumeThread(resumeId, threadOpts)
-      : client.startThread(threadOpts));
+      : client.startThread(threadOpts);
     opts?.signal?.throwIfAborted();
     opts?.assertPublishable?.();
     risk = 'unknown'; opts?.onExecutionRisk?.(risk);
     scope?.expectLaunch();
-    const { events } = await (async () => {
-      try { return await thread.runStreamed(prompt, { signal: opts?.signal }); }
-      catch (error) { rememberSdkException(error); throw error; }
-    })();
+    const { events } = await thread.runStreamed(prompt, { signal: opts?.signal });
 
     let reportedSessionId = false;
     let completed = false;
@@ -563,7 +540,7 @@ export async function* queryAgentEvents(
       return { seq: s, first: true };
     };
 
-    for await (const ev of sdkEvents(events as AsyncIterable<ThreadEvent>)) {
+    for await (const ev of events as AsyncIterable<ThreadEvent>) {
       opts?.signal?.throwIfAborted();
       opts?.assertPublishable?.();
       const eventType = ev.type;
