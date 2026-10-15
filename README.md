@@ -36,27 +36,38 @@ turn's snapshot. Direct terminal calls without adapter context have null IDs,
 an empty UID list, source `none`, and false flags.
 
 `is_explicitly_mentioned` means exact membership of the receiving runtime bot UID
-in the normalized transport mention list. Usable `entities[].uid` take precedence;
-legacy `uids` are a fallback when no usable entity UID exists. Contradictory lists
-are not combined. `mention_source` records `entities`, `uids`, `none`, or `invalid`.
-Broad AI/human/all flags accept only `true` or `1`, and do not count as an explicit
-UID mention. Neither textual `@name`, quoted messages, history, ownership,
-mention-free routing, nor authenticated internal triggers establish that fact.
-These fields describe transport context; they do not grant permissions.
+in either validated transport list. Rendered `entities[].uid` and routing `uids`
+are independent producer facts and are unioned and deduplicated; rendered spans
+need not include every targeted account. `mention_source` records `entities`,
+`uids`, `none`, or `invalid`. Broad AI/human/all flags accept only `true` or `1`,
+and do not count as an explicit UID mention. Neither textual `@name`, quoted
+messages, history, ownership, mention-free routing, nor authenticated internal
+triggers establish that fact. These fields do not grant permissions.
 
 UIDs are nonempty strings of at most 256 UTF-16 code units, with control and line
 separator characters rejected; IDs remain opaque without trimming, case folding,
-or space-prefix removal. Message IDs have the same validation with a 512-code-unit
-limit. Each mention array is limited to 128 entries, malformed entries are ignored,
-and duplicate UIDs are removed. Malformed containers or array shapes and oversized
-arrays produce source `invalid`, an empty list, and false flags. Missing or invalid
-runtime bot identity produces `bot_uid:null` and an explicit-mention flag of false.
-The router uses the same normalizer, including entity-only mentions and strict AI
-flags; legacy `all` and `humans` alone do not activate regular bots. Text slicing
-validates entity offset/length separately; broad AI admission does not strip a
-leading mention addressed to another member. Entity positions also prevent the
-legacy textual fallback from removing a teammate's mention when this bot is
-mentioned later in the message.
+or space-prefix removal. Message IDs use the same validation with a 512-code-unit
+limit. Each input array is limited to 128 entries. A malformed or oversized array
+is discarded independently; valid sibling arrays and strict broadcast flags are
+retained. Source `invalid` reports a rejected container/array; it no longer means
+all independent facts are false. Invalid entries inside valid arrays are ignored.
+Missing or invalid runtime bot identity produces `bot_uid:null` and false explicit
+membership.
+
+The prompt's UID snapshot is limited to 32 entries and 4096 serialized UTF-8 bytes
+(including JSON escaping). `mentioned_uids_truncated:true` appears only when some
+UIDs were omitted. Membership is computed before this snapshot cap, and a targeted
+receiving bot is always retained. This bounds the new metadata amplification;
+the existing security/sender framing remains outside the assembled body budget.
+
+The router uses the same membership and strict AI flags; `all` and `humans` alone
+do not activate regular bots. Invalid group mention data emits a fixed warning
+with bounded SHA-256 channel/message correlation, never raw IDs or message text.
+Text slicing validates entity offset/length separately and accepts ASCII `@` and
+fullwidth `＠`. Broad AI admission does not strip a leading mention addressed to
+another member. Entity positions prevent the legacy fallback from stripping a
+teammate's mention when this bot is mentioned later. Invalid containers/arrays
+preserve text rather than guessing a prefix to remove.
 
 Sender metadata has these security properties:
 

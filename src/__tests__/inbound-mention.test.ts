@@ -2,9 +2,51 @@ import { describe, expect, it } from 'vitest';
 import { normalizeInboundMention, normalizeMessageId } from '../inbound-mention.js';
 
 describe('transport mention normalization', () => {
-  it('prefers entity UIDs without unioning a contradictory legacy list', () => {
+  it('unions routing UIDs with independently rendered entity UIDs', () => {
     expect(normalizeInboundMention({ entities: [{ uid: 'other' }], uids: ['bot'] }, 'bot'))
-      .toMatchObject({ mentioned_uids: ['other'], mention_source: 'entities', is_explicitly_mentioned: false });
+      .toMatchObject({ mentioned_uids: ['other', 'bot'], mention_source: 'entities', is_explicitly_mentioned: true });
+  });
+  it.each([null, {}, 'bot', Array(129).fill('other')])('drops only the malformed array %j', (invalid) => {
+    for (const mention of [
+      { entities: invalid, uids: ['bot'] },
+      { entities: [{ uid: 'bot' }], uids: invalid },
+    ]) {
+      expect(normalizeInboundMention({ ...mention, ais: 1, humans: true, all: 1 }, 'bot'))
+        .toMatchObject({ mentioned_uids: ['bot'], is_explicitly_mentioned: true,
+          mentioned_ais: true, mentioned_humans: true, mentioned_all: true, mention_source: 'invalid' });
+    }
+  });
+  it.each(['uids', 'entities'])('preserves independent broadcast flags when %s is rejected', (field) => {
+    expect(normalizeInboundMention({ [field]: Array(129), ais: 1, humans: true, all: 1 }, 'bot'))
+      .toMatchObject({ mentioned_uids: [], is_explicitly_mentioned: false, mentioned_ais: true,
+        mentioned_humans: true, mentioned_all: true, mention_source: 'invalid' });
+  });
+  it('deduplicates both lists without mutating them', () => {
+    const mention = { entities: [{ uid: 'alice' }, { uid: 'bot' }], uids: ['bot', 'bob', 'alice'] };
+    const before = JSON.stringify(mention);
+    expect(normalizeInboundMention(mention, 'bot').mentioned_uids).toEqual(['alice', 'bot', 'bob']);
+    expect(JSON.stringify(mention)).toBe(before);
+  });
+  it('bounds escaped UTF-8 snapshot bytes while preserving a late receiving bot', () => {
+    const uids = Array.from({ length: 128 }, (_, n) => `${n}-` + '界"\\'.repeat(84));
+    const bot = uids.at(-1)!;
+    const result = normalizeInboundMention({ uids }, bot);
+    expect(result).toMatchObject({ is_explicitly_mentioned: true, mentioned_uids_truncated: true });
+    expect(result.mentioned_uids).toContain(bot);
+    expect(result.mentioned_uids.length).toBeLessThanOrEqual(32);
+    expect(Buffer.byteLength(JSON.stringify(result.mentioned_uids))).toBeLessThanOrEqual(4096);
+    expect(result.mentioned_uids.every(uid => uids.includes(uid))).toBe(true);
+    expect(normalizeInboundMention({ uids }, 'unmentioned').is_explicitly_mentioned).toBe(false);
+  });
+  it('keeps membership in either complete input list when their union is truncated', () => {
+    const entities = Array.from({ length: 128 }, (_, n) => ({ uid: `entity-${n}` }));
+    const uids = Array.from({ length: 128 }, (_, n) => `legacy-${n}`);
+    for (const bot of ['entity-127', 'legacy-127']) {
+      const result = normalizeInboundMention({ entities, uids }, bot);
+      expect(result).toMatchObject({ is_explicitly_mentioned: true, mentioned_uids_truncated: true, mention_source: 'entities' });
+      expect(result.mentioned_uids).toHaveLength(32);
+      expect(result.mentioned_uids).toContain(bot);
+    }
   });
   it('falls back to legacy UIDs only when no usable entity UID exists', () => {
     expect(normalizeInboundMention({ entities: [null, [], {}, { uid: 5 }, { uid: '' }], uids: ['bot'] }, 'bot'))
@@ -18,9 +60,8 @@ describe('transport mention normalization', () => {
     expect(normalizeInboundMention({ uids: [uid] }, uid === 'e\u0301' ? 'é' : 'bot').is_explicitly_mentioned).toBe(false);
   });
   it.each([null, 123, [], 'bot', { uids: 'bot' }, { entities: {} }, { entities: null },
-    { entities: Array(129).fill({ uid: 'bot' }), ais: true },
-    { uids: Array(129).fill('bot'), ais: 1 },
-    { entities: [{ uid: 'bot' }], uids: Array(129).fill('other') },
+    { entities: Array(129).fill({ uid: 'bot' }) },
+    { uids: Array(129).fill('bot') },
   ])('fails closed on malformed/oversized containers %j', (mention) => {
     expect(normalizeInboundMention(mention, 'bot')).toEqual({
       bot_uid: 'bot', mentioned_uids: [], mention_source: 'invalid',
@@ -30,7 +71,9 @@ describe('transport mention normalization', () => {
   it.each(['uids', 'entities'])('accepts the exact 128-entry %s limit', (field) => {
     const values = Array.from({ length: 128 }, (_, n) => n === 127 ? 'bot' : `user-${n}`);
     const result = normalizeInboundMention({ [field]: field === 'entities' ? values.map((uid) => ({ uid })) : values }, 'bot');
-    expect(result.mentioned_uids).toHaveLength(128);
+    expect(result.mentioned_uids).toHaveLength(32);
+    expect(result.mentioned_uids).toContain('bot');
+    expect(result.mentioned_uids_truncated).toBe(true);
     expect(result.is_explicitly_mentioned).toBe(true);
   });
   it('accepts the exact UID limit but rejects longer identifiers', () => {

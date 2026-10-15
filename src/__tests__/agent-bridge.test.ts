@@ -76,6 +76,22 @@ describe('current-turn mention facts in actual SDK prompts', () => {
       mentioned_uids: ['bot'], mention_source: 'uids', is_explicitly_mentioned: true });
   });
 
+  it.each([undefined, 'existing-thread'])('retains late bot membership in a bounded SDK metadata snapshot (%s)', async resume => {
+    scriptedRuns = [async function* () { yield turnDone; }];
+    const uids = Array.from({ length: 128 }, (_, n) => `${n}-` + '界'.repeat(250));
+    const bot = uids.at(-1)!;
+    const context = buildSenderContext({ message_id: 'bounded-message', message_seq: 1, from_uid: 'user',
+      channel_id: 'group', channel_type: ChannelType.Group, timestamp: 1,
+      payload: { type: MessageType.Text, content: 'request', mention: { uids } },
+    }, 'owner', bot);
+    await collect(queryAgent('request', cfg(), undefined, undefined, { senderContext: context, resume }));
+    const facts = currentMetadata(prompts[0]);
+    expect(facts).toMatchObject({ bot_uid: bot, is_explicitly_mentioned: true, mentioned_uids_truncated: true });
+    expect(facts.mentioned_uids).toContain(bot);
+    expect(facts.mentioned_uids.length).toBeLessThanOrEqual(32);
+    expect(Buffer.byteLength(JSON.stringify(facts.mentioned_uids))).toBeLessThanOrEqual(4096);
+  });
+
   it('retains current facts through stale-thread retry and subsequent stream recovery', async () => {
     scriptedRuns = [async function* () { throw new Error('thread not found'); },
       async function* () { yield started('fresh-thread'); throw new Error('stream closed before response.completed'); },

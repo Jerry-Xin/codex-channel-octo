@@ -2,12 +2,13 @@
  * Session Router — routing + concurrency control + mention gate + rate limiting.
  */
 
+import { createHash } from 'node:crypto';
 import type { Config } from './config.js';
 import type { BotMessage } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
 import { isAuthenticCronFire } from './cron-fire-marker.js';
-import { normalizeInboundMention } from './inbound-mention.js';
+import { normalizeInboundMention, normalizeMessageId } from './inbound-mention.js';
 import { MentionPreferences } from './mention-prefs.js';
 import { summarizeAgentError } from './agent-errors.js';
 import { ConversationMarkdown, type ConversationTurnContext } from './conversation-md.js';
@@ -333,6 +334,15 @@ export class SessionRouter {
 
   private isMentioned(msg: BotMessage): boolean {
     const mention = normalizeInboundMention(msg.payload.mention, this.robotId);
+    if (mention.mention_source === 'invalid') {
+      const fingerprint = (value: unknown): string | null => {
+        const id = normalizeMessageId(value);
+        return id === null ? null : createHash('sha256').update(id).digest('hex');
+      };
+      console.warn('[codex-channel-octo] invalid mention metadata', JSON.stringify({
+        channelHash: fingerprint(msg.channel_id), messageHash: fingerprint(msg.message_id), mention_source: 'invalid',
+      }));
+    }
     // Note: mention.all is a humans-only signal (@所有人), bots do NOT respond.
     return mention.is_explicitly_mentioned || mention.mentioned_ais;
   }
@@ -483,7 +493,7 @@ export class SessionRouter {
           const botEntity = mention.entities.find(
             (e) => e !== null && typeof e === 'object' && !Array.isArray(e)
               && e.uid === this.robotId && e.offset === 0 && Number.isSafeInteger(e.length)
-              && e.length > 0 && e.length <= content.length && content.startsWith('@')
+              && e.length > 0 && e.length <= content.length && /^[@＠]/.test(content)
               // Do not split a UTF-16 surrogate pair at the removal boundary.
               && (content.codePointAt(e.length - 1) ?? 0) <= 0xffff,
           );
@@ -495,7 +505,7 @@ export class SessionRouter {
         // In mention-free groups (G12) where the bot wasn't @'d, do NOT touch
         // the message — a leading @ is addressed to someone else.
         if (cleanContent === content && metadata.is_explicitly_mentioned && metadata.mention_source === 'uids') {
-          cleanContent = content.replace(/^@\S+\s*/, '').trimStart();
+          cleanContent = content.replace(/^[@＠]\S+\s*/, '').trimStart();
         }
         // If stripping emptied the content, keep original.
         if (!cleanContent) cleanContent = content;

@@ -12,6 +12,7 @@ import { ChannelType, MessageType } from '../octo/types.js';
 import type { Config } from '../config.js';
 import { sendMessage } from '../octo/api.js';
 import { buildSenderContext } from '../sender-context.js';
+import { createHash } from 'node:crypto';
 
 const ROBOT_ID = 'bot-001';
 
@@ -21,7 +22,8 @@ function makeConfig(overrides?: Partial<Config>): Config {
     apiUrl: 'https://test.example.com',
     cwd: '/tmp',
     dataDir: '/tmp/data',
-    sdk: { allowedTools: [], permissionMode: 'bypassPermissions', settingSources: ['user'] },
+    sdk: {},
+    baseDir: '/tmp', maxResponseChars: 524288, dispatchTimeoutMs: 300000,
     rateLimit: { maxPerMinute: 5 },
     context: { maxContextChars: 6000, historyLimit: 40 },
     botBlocklist: ['blocked-bot-1'],
@@ -117,14 +119,61 @@ describe('SessionRouter', () => {
 
   // --- Mention gate ---
 
+  it('admits a producer-shaped routing mention without stripping a teammate span', async () => {
+    const msg = makeMsg({ payload: { type: MessageType.Text, content: '@Alice @bot-001 please look',
+      mention: { uids: ['alice', ROBOT_ID], entities: [{ uid: 'alice', offset: 0, length: 6 }] } } });
+    expect(await router.route(msg)).toMatchObject({ shouldProcess: true, cleanContent: msg.payload.content });
+    expect(JSON.parse(buildSenderContext(msg, 'owner', ROBOT_ID).split('\n')[1]))
+      .toMatchObject({ mentioned_uids: ['alice', ROBOT_ID], mention_source: 'entities', is_explicitly_mentioned: true });
+  });
+
+  it.each([
+    { entities: null, uids: [ROBOT_ID] },
+    { entities: [{ uid: ROBOT_ID }], uids: Array(129).fill('other') },
+    { uids: 'malformed', ais: true },
+    { entities: Array(129), ais: 1 },
+  ])('keeps valid independent admission facts and logs bounded correlation: %j', async mention => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const msg = makeMsg({ channel_id: 'SYNTHETIC_CHANNEL', message_id: 'SYNTHETIC_MESSAGE',
+        payload: { type: MessageType.Text, content: 'SYNTHETIC_BODY', mention: mention as unknown as BotMessage['payload']['mention'] } });
+      expect((await router.route(msg))?.shouldProcess).toBe(true);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toBe('[codex-channel-octo] invalid mention metadata');
+      expect(JSON.parse(warn.mock.calls[0][1] as string)).toEqual({
+        mention_source: 'invalid', channelHash: createHash('sha256').update(msg.channel_id!).digest('hex'),
+        messageHash: createHash('sha256').update(msg.message_id).digest('hex'),
+      });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('SYNTHETIC_');
+    } finally { warn.mockRestore(); }
+  });
+
+  it('rejects an unusable mention with a fixed warning, without trusting humans/all as AI', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const msg = makeMsg({ channel_id: 'group-1', message_id: 'x'.repeat(513),
+        payload: { type: MessageType.Text, content: 'private', mention: { uids: 'invalid', humans: 1, all: 1 } as unknown as BotMessage['payload']['mention'] } });
+      expect(await router.route(msg)).toBeNull();
+      expect(warn).toHaveBeenCalledOnce();
+      expect(JSON.parse(warn.mock.calls[0][1] as string).messageHash).toBeNull();
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('private');
+    } finally { warn.mockRestore(); }
+  });
+
+  it.each(['entities', 'uids'])('strips a valid fullwidth leading mention using %s', async source => {
+    const msg = makeMsg({ payload: { type: MessageType.Text, content: '＠bot-001 hi',
+      mention: source === 'entities' ? { entities: [{ uid: ROBOT_ID, offset: 0, length: 8 }] } : { uids: [ROBOT_ID] } } });
+    expect((await router.route(msg))?.cleanContent).toBe('hi');
+  });
+
   it.each([
     [{ entities: [{ uid: ROBOT_ID, offset: 0, length: 8 }] }, true, true],
-    [{ entities: [{ uid: 'other', offset: 0, length: 8 }], uids: [ROBOT_ID] }, false, false],
+    [{ entities: [{ uid: 'other', offset: 0, length: 8 }], uids: [ROBOT_ID] }, true, true],
     [{ entities: [null], uids: [ROBOT_ID] }, true, true],
     [{ ais: true }, true, false],
     [{ all: 1, humans: 1 }, false, false],
     [{ ais: 'false' }, false, false],
-    [{ uids: ROBOT_ID, ais: true }, false, false],
+    [{ uids: ROBOT_ID, ais: true }, true, false],
   ])('uses the same structured mention facts for routing and attribution: %j', async (mention, passes, explicit) => {
     const msg = makeMsg({ payload: { type: MessageType.Text, content: '@bot-001 hi',
       mention: mention as unknown as NonNullable<BotMessage['payload']['mention']> } });

@@ -69,6 +69,7 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     root = mkdtempSync(join(tmpdir(), 'octo-inbound-wiring-'));
     mkdirSync(join(root, 'instructions'));
     stack = await startBot({
+      baseDir: root, maxResponseChars: 524288, dispatchTimeoutMs: 300000,
       botId: 'test', apiUrl: 'https://octo.example', botToken: 'test-token',
       cwd: join(root, 'workspace'), dataDir: join(root, 'data'), sdk: {},
       groupConfigDir: join(root, 'instructions'),
@@ -218,16 +219,43 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     });
   });
 
+  it.each([
+    { uids: ['alice', 'test_bot'], entities: [{ uid: 'alice', offset: 0, length: 6 }] },
+    { uids: ['test_bot'], entities: null },
+    { uids: Array(129).fill('other'), entities: [{ uid: 'test_bot', offset: 7, length: 9 }] },
+    { uids: 'invalid', ais: 1 },
+  ])('dispatches independent transport mention facts through the actual socket: %j', async mention => {
+    vi.mocked(getMentionPreference).mockResolvedValue(true); // mention required
+    vi.mocked(queryAgent).mockImplementation(async function* () { yield 'reply'; });
+    const route = vi.spyOn(stack!.router, 'routeAndHandle');
+    const appended = vi.spyOn(SessionStore.prototype, 'appendAssistant');
+    spies.push(route, appended);
+    emit(message({ payload: { type: MessageType.Text, content: '@Alice @test_bot request',
+      mention: mention as unknown as BotMessage['payload']['mention'] } }));
+    await route.mock.results[0].value;
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ channelId: 'group____topic', content: 'reply' }));
+    expect(appended).toHaveBeenCalledWith('group____topic', 'reply', expect.any(Number), 'test_bot');
+    expect(queryAgent).toHaveBeenCalledOnce();
+    expect(vi.mocked(queryAgent).mock.calls[0][0]).toContain('@Alice @test_bot request');
+    const facts = JSON.parse(vi.mocked(queryAgent).mock.calls[0][4]!.senderContext!.split('\n')[1]);
+    expect(facts.is_explicitly_mentioned).toBe(mention.ais !== 1);
+    expect(facts.mentioned_ais).toBe(mention.ais === 1);
+    expect(facts.mention_source).toBe(mention.entities?.[0]?.uid === 'alice' ? 'entities' : 'invalid');
+  });
+
   it.each(['uids', 'entities'])('passes original %s mentions through text stripping and refreshes them on resume', async (source) => {
     vi.mocked(queryAgent).mockImplementation(async function* (_text, _config, _context, _toolUse, options) {
-      options?.onSessionId?.('mention-thread');
+      options?.onSessionId?.('mention-thread', _text);
       yield 'reply';
     });
     const route = vi.spyOn(stack!.router, 'routeAndHandle');
-    spies.push(route);
+    const appended = vi.spyOn(SessionStore.prototype, 'appendAssistant');
+    spies.push(route, appended);
     emit(message({ message_id: 'explicit-first', payload: { type: MessageType.Text, content: '@test_bot Check this change',
       mention: source === 'entities' ? { entities: [{ uid: 'test_bot', offset: 0, length: 9 }] } : { uids: ['test_bot'] } } }));
     await route.mock.results[0].value;
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ channelId: 'group____topic', content: 'reply' }));
+    expect(appended).toHaveBeenCalledWith('group____topic', 'reply', expect.any(Number), 'test_bot');
     const [firstPrompt, , , , firstOptions] = vi.mocked(queryAgent).mock.calls[0];
     expect(firstPrompt).toContain('Check this change');
     expect(firstPrompt).not.toContain('@test_bot');
@@ -238,6 +266,8 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     emit(message({ message_id: 'broadcast-second', message_seq: 2, payload: { type: MessageType.Text,
       content: '@other Next request', mention: { ais: 1 } } }));
     await route.mock.results[1].value;
+    expect(appended).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(sendMessage).mock.calls.filter(([options]) => options.content === 'reply')).toHaveLength(2);
     const [nextPrompt, , , , nextOptions] = vi.mocked(queryAgent).mock.calls[1];
     expect(nextPrompt).toContain('@other Next request');
     expect(nextOptions?.resume).toBe('mention-thread');
@@ -251,7 +281,7 @@ describe('production socket → gateway → onInbound → router wiring', () => 
       robot_id: 'second_bot', im_token: 'test-im-token', ws_url: 'ws://localhost',
       api_url: 'https://octo.example', owner_uid: 'human', owner_channel_id: 'owner-channel',
     });
-    const sibling = await startBot({ botId: 'second', apiUrl: 'https://octo.example', botToken: 'test-token',
+    const sibling = await startBot({ baseDir: root, maxResponseChars: 524288, dispatchTimeoutMs: 300000, botId: 'second', apiUrl: 'https://octo.example', botToken: 'test-token',
       cwd: join(root, 'sibling-workspace'), dataDir: join(root, 'sibling-data'), sdk: {},
       rateLimit: { maxPerMinute: 100 }, context: { maxContextChars: 6000, historyLimit: 40 } }, true);
     try {
