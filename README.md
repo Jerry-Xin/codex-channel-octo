@@ -244,6 +244,10 @@ npm run lint        # eslint --max-warnings 0
 npm run type-check  # tsc --noEmit
 ```
 
+### Private operator diagnostics (opt-in)
+
+Set `sdk.privateDiagnostics: true` to retain local failure metadata correlated with task IDs. SDK message text is fingerprinted, never stored; public replies remain unchanged. Records use owner-only rotated files (three files of at most 1 MiB each). See [privacy, rotation, and interpretation](docs/private-diagnostics.md).
+
 ## License
 
 Apache-2.0

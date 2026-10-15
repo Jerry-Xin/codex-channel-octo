@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { recordPrivateFailure } from './private-diagnostics.js';
 import { sendMessage as sendTurnMessage } from './octo/api.js';
 import { AgentFailure, TurnFailure, classifyFailure, failureReply, type FailureStage } from './agent-failure.js';
 /**
@@ -847,6 +848,9 @@ export async function handleMessage(
         first: { ...classifyFailure(err), stage: err instanceof AgentFailure ? err.snapshot.stage : stage }, final: { ...classifyFailure(err), stage: err instanceof AgentFailure ? err.snapshot.stage : stage },
       };
       if (failure.executionRisk !== 'proven_not_started' && ['inference','jsonl_parse','process_exit'].includes(failure.final.stage)) turn.needsReconciliation = true;
+      if (!recordPrivateFailure(config.dataDir, config.sdk.privateDiagnostics === true, failure, err)) {
+        console.warn('[codex-channel-octo] private diagnostics unavailable');
+      }
       console.error('[codex-channel-octo] turn failed', JSON.stringify(failure));
       const content = failureReply(failure);
       try {

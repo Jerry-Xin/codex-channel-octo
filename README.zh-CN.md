@@ -206,6 +206,10 @@ npm run lint        # eslint --max-warnings 0
 npm run type-check  # tsc --noEmit
 ```
 
+### 本机运维诊断（默认关闭）
+
+设置 `sdk.privateDiagnostics: true` 可保存与任务编号关联的本机失败元数据。SDK 错误文本只保留指纹，不写入原文；公开回复不变。日志仅当前用户可读，最多保留三个文件，每个不超过 1 MiB。详见[隐私边界、保留策略与解读](docs/private-diagnostics.md)。
+
 ## License
 
 Apache-2.0

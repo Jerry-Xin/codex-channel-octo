@@ -6,6 +6,7 @@
   "_comment_apiUrl": "apiUrl — override the Octo API base for this bot.",
 
   "sdk": {
+    "_comment_private_diagnostics": "Optional override: privateDiagnostics=true records bounded local failure metadata and message fingerprints; defaults off. No raw messages or tool output.",
     "_comment_model": "Override the model for this bot, e.g. 'gpt-5.5'. Omit to use the codex provider default.",
     "_comment_systemPrompt": "Inline personality string. A ./SOUL.md file next to this config overrides it. Written to the session AGENTS.md together with the security prefix.",
     "_comment_codex_home": "Per-bot CODEX_HOME (codex auth/config/sessions root). Defaults to ./codex-home (isolated — IM content stays out of your personal ~/.codex; authenticate it via `codex login` with CODEX_HOME set, or set sdk.codexApiKey). OPT-IN SHARING: set this to your personal ~/.codex to let IM threads be resumed from your own terminal — note IM content then lands in your personal codex sessions.",
