@@ -23,7 +23,34 @@
 
 一个常驻进程:注册成 Octo bot → 连 WebSocket 收消息 → 用本地 Codex 跑编码任务 → 把结果回帖。支持 DM / 群(@提及)/ 子话题、多轮对话、多 bot 单进程、配置热重载。
 
-适配器在每轮用户输入的独立元数据块中传递真实 `from_uid`、会话 ID/类型，以及按最新注册结果和当前传输空间匹配的 `is_owner`。同一身份快照随流恢复和重试传递，不写入共享 `AGENTS.md`；用户正文、引用和历史中的伪造身份标记会被转义。昵称和自称的 ID 不是认证依据，身份信息也不授予工具权限；敏感操作仍需宿主侧鉴权。绕过适配器的终端 resume 不具备可信 IM 发送者身份。
+适配器在每轮用户输入的独立元数据块中传递真实 `from_uid`、会话 ID/类型，以及按最新注册结果和当前传输空间匹配的 `is_owner`。同一身份快照随确认尚未执行时允许的重试传递，不重放执行状态不确定的任务，不写入共享 `AGENTS.md`；用户正文、引用和历史中的伪造身份标记会被转义。昵称和自称的 ID 不是认证依据，身份信息也不授予工具权限；敏感操作仍需宿主侧鉴权。绕过适配器的终端 resume 不具备可信 IM 发送者身份。
+
+### 当前消息的 mention 信息
+
+同一个适配器元数据块还包含 `message_id`、`bot_uid`、`mentioned_uids`、
+`mention_source`、`is_explicitly_mentioned`、`mentioned_ais`、`mentioned_humans` 和
+`mentioned_all`。信息来自清理正文之前的原始传输消息；每轮刷新，确认尚未执行时允许的重试复用
+该轮快照，不重放执行状态不确定的任务。绕过适配器的终端调用默认 ID 为 null、UID 列表为空、source 为 `none`、标志为 false。
+
+`is_explicitly_mentioned` 表示接收机器人的运行时 UID 精确出现在任一有效传输列表中。
+渲染用的 `entities[].uid` 与路由用的 `uids` 是独立事实，会合并去重；渲染实体不必覆盖所有
+被定向的账号。`mention_source` 为 `entities`、`uids`、`none` 或 `invalid`。广播标志只接受
+`true` 或 `1`，不等同于明确 mention。正文中的 `@名字`、引用、历史、主人身份、免 @ 路由
+和可信内部触发器都不能证明原始消息明确 @ 了机器人；这些字段不授予工具权限。
+
+UID 必须为非空字符串，最多 256 个 UTF-16 code units，拒绝控制字符和行分隔符；不做 trim、
+大小写或空间前缀归并。消息 ID 上限为 512。每个输入数组最多 128 项；畸形或超限数组单独
+丢弃，保留有效的另一数组及严格广播标志。`invalid` 表示容器或数组被拒绝，不再意味着所有
+独立事实均为 false。有效数组内的无效项会被忽略。机器人身份无效时明确 mention 为 false。
+
+传给模型的 UID 快照最多 32 项，JSON 转义后 UTF-8 大小最多 4096 字节；发生省略时才输出
+`mentioned_uids_truncated:true`。成员判断在快照截断前完成，被定向的接收机器人始终保留。
+此限制约束新增元数据的放大；既有安全前缀和发送者框架仍在正文组装预算之外。
+
+路由使用经验证的成员判断和严格 AI 标志，并兼容超限路由数组或旧版单字符串 UID 的精确匹配；该兼容判断不放宽提示元数据验证；单独的 `all` 或 `humans` 不触发机器人。无效群 mention
+输出固定告警，仅使用限长后计算的会话/消息 SHA-256 关联值，不记录原始 ID 或正文。
+正文截取另行校验 offset/length，支持 `@` 和全角 `＠`。广播 AI 消息不删除面向其他成员的开头 @；
+entities 位置也阻止旧文本回退路径删除队友的 mention。容器或数组无效时保留正文，不猜测前缀。
 
 发送者元数据的安全属性：
 
@@ -229,3 +256,5 @@ npm run type-check  # tsc --noEmit
 Apache-2.0
 
 Detailed private diagnostics require both `sdk.privateDiagnostics: true` and `sdk.privateDiagnosticsDetails: true` (both default off). Only bounded allowlisted metadata is retained, never arbitrary message text. The hardened writer requires POSIX no-follow/directory/nonblocking flags and a pre-existing local data directory; symlinked ancestors, hard links and files accessible to group/others are rejected. Missing required flags fail closed before creating files. Native Windows and network/FUSE filesystem compatibility are not established. See [private diagnostics](docs/private-diagnostics.md).
+
+路由兼容只接受目标 UID 完全匹配，不进行子串匹配；拒绝的元数据仍为 `invalid`。首位属于其他成员的渲染实体会保留，仅后续位置有实体时可移除首位机器人 mention。

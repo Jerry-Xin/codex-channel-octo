@@ -72,7 +72,7 @@ describe('T26: framing keeps sender and private-memory guidance on a successful 
   scriptedRuns=[async function*(){yield {type:'turn.completed',usage:{}};}];
   await drain();expect(prompts).toHaveLength(1);
   expect(prompts[0].endsWith('\n\n---\n\n[Current message — respond to this ONLY]\nUSER BODY')).toBe(true);
-  expect(sha(prompts[0])).toBe('57331a39a9978e6c2bc5e4de7ac1465f4d1bf4914c30c3a50c9833e1b82e2488');
+  expect(sha(prompts[0])).toBe('fffa3e75f14799f20c9bf99926b293bd0371dbee62fea0455f5dcee986233f34');
  });
  it('never emits fallback or continuation prompts when execution is uncertain',async()=>{
   scriptedRuns=[async function*(){throw new Error(interrupt);}];
