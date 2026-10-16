@@ -24,6 +24,7 @@ import { Codex } from '@openai/codex-sdk';
 import type { ThreadEvent, ThreadItem, ThreadOptions } from '@openai/codex-sdk';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
+import { OutputCollector, DEFAULT_OUTPUT_SELECTION_MODE, DEFAULT_MAX_RESPONSE_CHARS, type OutputSelectionMode } from './output-selection.js';
 import type { Config } from './config.js';
 import { fileURLToPath } from 'node:url';
 import { resolveJsonlProxyPath } from './jsonl-proxy-path.js';
@@ -511,6 +512,24 @@ export async function* queryAgentEvents(
 
     let reportedSessionId = false;
     let completed = false;
+    // CLI JSONL drops app-server's will_retry flag. A stream error or warning
+    // item can precede a successful terminal event in the SAME execution.
+    // Retain one bounded diagnostic until the terminal state is known rather
+    // than closing the SDK iterator (which terminates its subprocess).
+    let pendingFailure: AgentFailure | undefined;
+    let deferredCount = 0;
+    const deferFailure = (failure: AgentFailure): void => {
+      if (completed) throw failure;
+      // Keep the first diagnostic: a later reconnect notice must not overwrite
+      // an earlier genuine failure. Logs have fixed vocabulary and bounded counts.
+      pendingFailure ??= failure;
+      if (deferredCount === 0) console.warn('[codex-channel-octo] CLI notification deferred');
+      deferredCount = Math.min(deferredCount + 1, 65535);
+    };
+    // Use the same selection rules as the delivery path, including overwritten
+    // snapshots, phases, formatting-only messages and the configured output cap.
+    const reply = new OutputCollector();
+    reply.push({ kind: 'attempt_start', attempt, reason: attemptCtx.reason, continues: attemptCtx.continues });
     // Latest text per agent_message id, for the post-drain side-effect mark.
     const latestText = new Map<string, string>();
     // First-sight seq per item id of THIS run. Codex (0.142) emits each agent
@@ -543,7 +562,10 @@ export async function* queryAgentEvents(
           if (!NON_WORK_ITEM_TYPES.has(item.type)) {
             // Work boundary: once per item, at first sight. Type only.
             const s = sight(item.id);
-            if (s.first) yield { kind: 'work', attempt, itemId: item.id, seq: s.seq, itemType: item.type };
+            if (s.first) {
+              const event: AgentOutputEvent = { kind: 'work', attempt, itemId: item.id, seq: s.seq, itemType: item.type };
+              reply.push(event); yield event;
+            }
           }
           if (isSideEffectItem(item.type)) {
             sideEffect.seen = true; risk = 'effects_observed'; opts?.onExecutionRisk?.(risk);
@@ -575,22 +597,18 @@ export async function* queryAgentEvents(
             const s = sight(item.id);
             const text = typeof item.text === 'string' ? item.text : '';
             latestText.set(item.id, text);
-            yield { kind: 'message', attempt, itemId: item.id, seq: s.seq, text, phase: readPhase(item) };
+            const event: AgentOutputEvent = { kind: 'message', attempt, itemId: item.id, seq: s.seq, text, phase: readPhase(item) };
+            reply.push(event); yield event;
           } else if (item.type === 'error') {
             const itemMsg = item.message ?? 'codex item error';
             // Codex reports metadata fallback and a resumed session's model
-            // change as error items, then continues the turn. Drain only these
-            // known notices; genuine tool/model failures must still throw.
+            // change as error items, then continues the turn. Keep their safe
+            // progress notice; other warnings also wait for the turn outcome.
             const modelChanged = /^This session was recorded with model `([^`\r\n]+)` but is resuming with `[^`\r\n]+`\. Consider switching back to `\1` as it may affect Codex performance\.$/.test(itemMsg);
             if (modelChanged || /^Model metadata for `[^`\r\n]+` not found\. Defaulting to fallback metadata(?:[.;]|$)/i.test(itemMsg)) {
               console.warn('[codex-channel-octo] non-fatal codex model notice');
             } else {
-              // A genuine failed tool/model step reported AS an item (distinct
-              // from the stream-level 'error' event). Surface it as a thrown
-              // error so the turn doesn't silently produce zero output (which
-              // would look like "no response") and so stale-resume detection can
-              // run. Any side effect already seen suppresses retry.
-              throw sdkFailure(itemMsg, 'item.error');
+              deferFailure(sdkFailure(itemMsg, 'item.error'));
             }
           } else if (
             (item.type === 'reasoning' || item.type === 'todo_list') &&
@@ -612,15 +630,38 @@ export async function* queryAgentEvents(
           break;
         case 'turn.failed':
           throw sdkFailure(ev.error?.message ?? '', 'turn.failed');
-        case 'error':
-          throw sdkFailure(ev.message ?? '', 'error');
+        case 'error': {
+          deferFailure(sdkFailure(ev.message ?? '', 'error'));
+          break;
+        }
       }
+    }
+
+    // Neither an exhausted iterator nor partial text proves success. A pending
+    // notification provides the original diagnostic if the CLI never finishes;
+    // a real turn.failed or process/parse exception already propagates above.
+    if (!completed) {
+      throw pendingFailure ?? new AgentFailure({
+        stage: 'inference', category: 'stream_interrupted', source: 'local', evidence: 'structured',
+      });
+    }
+
+    if (pendingFailure) {
+      reply.push({ kind: 'attempt_end', attempt, terminal: 'completed' });
+      const selected = reply.select({
+        mode: (config.sdk.outputSelection ?? DEFAULT_OUTPUT_SELECTION_MODE) as OutputSelectionMode,
+        maxChars: config.maxResponseChars ?? DEFAULT_MAX_RESPONSE_CHARS,
+      });
+      // A silent terminal must take the ordinary failure/reconciliation path,
+      // never invite the user to replay potentially completed tool operations.
+      if (!selected.text) throw pendingFailure;
+      console.warn('[codex-channel-octo] CLI notifications recovered', JSON.stringify({ count: deferredCount }));
     }
 
     // The run drained. Mark side-effect-seen once it produced text so a
     // post-output failure is never fresh-retried.
     if ([...latestText.values()].some((t) => t)) sideEffect.seen = true;
-    yield { kind: 'attempt_end', attempt, terminal: completed ? 'completed' : 'no_terminal' };
+    yield { kind: 'attempt_end', attempt, terminal: 'completed' };
   }
 
   let risk: ExecutionRisk = 'proven_not_started';

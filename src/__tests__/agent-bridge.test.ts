@@ -525,12 +525,14 @@ describe('queryAgent event mapping', () => {
     `Request failed: ${modelChangeNotice}`,
     `${modelChangeNotice} Authentication failed.`,
     modelChangeNotice.replace('switching back to `gpt-5.5`', 'switching back to `other-model`'),
-  ])('still throws for a genuine error resembling a fallback notice: %s', async (message) => {
+  ].flatMap(message => ['completed', 'failed'].map(terminal => ({ message, terminal }))))('does not mistake a genuine $terminal turn for a fallback notice: $message', async ({ message, terminal }) => {
     scriptedRuns = [async function* () {
       yield started('tid');
       yield { type: 'item.completed', item: { id: 'e1', type: 'error', message } };
-      yield msg('m1', 'must not be returned');
-      yield turnDone;
+      if (terminal === 'failed') {
+        yield msg('m1', 'must not be returned');
+        yield { type: 'turn.failed', error: { message } };
+      } else yield turnDone;
     }];
     await expect(collect(queryAgent('hi', cfg()))).rejects.toBeInstanceOf(TurnFailure);
     expect(calls).toHaveLength(1);
