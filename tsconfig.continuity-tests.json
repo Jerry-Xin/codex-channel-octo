@@ -4,6 +4,7 @@
   "include": [
     "src/__tests__/agent-bridge-events.test.ts",
     "src/__tests__/private-diagnostics.test.ts",
+    "src/__tests__/private-diagnostics-platform.test.ts",
     "src/__tests__/private-diagnostics-no-text.test.ts",
     "src/__tests__/private-diagnostics-config.test.ts",
     "src/__tests__/private-diagnostics-io.test.ts",

@@ -264,3 +264,5 @@ Set `sdk.privateDiagnostics: true` to retain local failure metadata correlated w
 ## License
 
 Apache-2.0
+
+Detailed private diagnostics require both `sdk.privateDiagnostics: true` and `sdk.privateDiagnosticsDetails: true` (both default off). Only bounded allowlisted metadata is retained, never arbitrary message text. The hardened writer requires POSIX no-follow/directory/nonblocking flags and a pre-existing local data directory; symlinked ancestors, hard links and files accessible to group/others are rejected. Missing required flags fail closed before creating files. Native Windows and network/FUSE filesystem compatibility are not established. See [private diagnostics](docs/private-diagnostics.md).

@@ -1,5 +1,6 @@
 /** Public diagnostics are closed snapshots, never exception messages or causes. */
 import { randomUUID } from 'node:crypto';
+import { types as utilTypes } from 'node:util';
 export type FailureStage = 'prepare' | 'spawn' | 'inference' | 'jsonl_parse' | 'process_exit' | 'delivery' | 'history_commit' | 'cleanup';
 export type FailureCategory = 'network_transient' | 'stream_interrupted' | 'rate_limited' | 'quota_exhausted' | 'provider_unavailable' | 'auth' | 'permission' | 'context_limit' | 'invalid_encrypted_content' | 'invalid_config' | 'jsonl_incomplete' | 'jsonl_invalid' | 'proxy_bootstrap' | 'process_exit' | 'cancelled' | 'timeout' | 'delivery_failed' | 'api_failed' | 'history_failed' | 'unknown';
 export type ExecutionRisk = 'proven_not_started' | 'effects_observed' | 'unknown';
@@ -32,7 +33,24 @@ export class TurnFailure extends AgentFailure {
   constructor(readonly report: Readonly<FailureReport>) { super(report.final); }
 }
 export const diagnosticId = (): string => randomUUID();
+function safeFailureReflection(value: unknown): boolean {
+  let cursor: unknown = value;
+  for (let depth = 0; cursor !== null && (typeof cursor === 'object' || typeof cursor === 'function'); depth++) {
+    if (depth >= 32 || utilTypes.isProxy(cursor)) return false;
+    for (const key of ['message', 'name', 'code', 'syscall', 'cause', 'snapshot']) {
+      const descriptor = Object.getOwnPropertyDescriptor(cursor, key);
+      if (descriptor && !('value' in descriptor)) return false;
+    }
+    cursor = Object.getPrototypeOf(cursor);
+  }
+  return true;
+}
 export function classifyFailure(error: unknown, source: FailureSnapshot['source'] = 'sdk_exception'): FailureSnapshot {
+  // Reject reflection hazards in both the thrown value and its parse-error cause
+  // before instanceof/property reads. Diagnostics flags never change this rule.
+  if (!safeFailureReflection(error) || (error instanceof Error && !safeFailureReflection(error.cause))) {
+    return {stage:'inference',category:'unknown',source,evidence:'unknown'};
+  }
   if (error instanceof AgentFailure) return { ...error.snapshot };
   const msg = error instanceof Error ? error.message : '';
   const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;

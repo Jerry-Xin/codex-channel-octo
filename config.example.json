@@ -12,6 +12,8 @@
   "sdk": {
     "_comment_private_diagnostics": "Opt-in owner-only failure metadata and SDK message fingerprints under each bot data/diagnostics. No raw error/prompt/tool text. Rotation: 3 files, 1 MiB each.",
     "privateDiagnostics": false,
+    "privateDiagnosticsDetails": false,
+    "_privateDiagnosticsDetails_comment": "Requires privateDiagnostics too; bounded allowlisted metadata only, no arbitrary text. Requires local POSIX filesystem safety guarantees.",
     "_comment_codex_base_url": "Optional self-hosted Codex provider base URL (e.g. a private gateway). Passed to new Codex({ baseUrl }). Must be https:// (or http://localhost for dev) — SSRF-validated at boot. Omit to use codex's configured default.",
     "_comment_codex_api_key": "Optional API key for the Codex provider, passed to new Codex({ apiKey }). Alternatively authenticate per-bot via `codex login` against the bot's codex-home.",
     "_comment_sandbox": "sandboxMode defaults to 'read-only'. For sandboxed editing set BOTH allowWorkspaceWrite=true AND sandboxMode='workspace-write'. For a dedicated externally isolated container, explicitly set sandboxMode='danger-full-access' to disable Codex sandboxing (see config.bot.docker.example.json).",

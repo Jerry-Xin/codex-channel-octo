@@ -118,7 +118,7 @@ describe('separately enabled SDK detail',()=>{
  it('fails closed on reflection trouble without replacing the actual error',()=>{
   const error=new Error('PRIVATE');const fields=new Proxy({}, {getOwnPropertyDescriptor(){throw Error('PRIVATE_TRAP');}});
   expect(()=>rememberSdkFailure(error,'exception',error.message,{detailed:true,fields})).not.toThrow();
-  expect(privateDiagnosticRow(report,error)).not.toHaveProperty('sdk');expect(error.message).toBe('PRIVATE');
+  expect(privateDiagnosticRow(report,error)).not.toHaveProperty('sdk.detail');expect(error.message).toBe('PRIVATE');
  });
  it.each([['code 137',{exitCode:137}],['signal SIGTERM',{signal:'SIGTERM'}]])('extracts only an SDK exit header: %s',(header,metadata)=>{
   const row=detail(`Codex Exec exited with ${header}: PRIVATE_STDERR https://private.example/?token=SECRET`);
@@ -166,7 +166,7 @@ describe('review regressions: proxies and status aliases',()=>{
   const proxy=new Proxy(original,{getOwnPropertyDescriptor(target,key){traps++;target.message='PRIVATE_MUTATED';return Reflect.getOwnPropertyDescriptor(target,key);}});
   const before=classifyFailure(proxy);
   rememberSdkFailure(proxy,'exception',proxy.message,{detailed,fields:proxy});
-  expect(traps).toBe(0);expect(classifyFailure(proxy)).toEqual(before);expect(before.category).toBe('stream_interrupted');
+  expect(traps).toBe(0);expect(classifyFailure(proxy)).toEqual(before);expect(before.category).toBe('unknown');
   expect(privateDiagnosticRow(report,proxy)).not.toHaveProperty('sdk');
  });
  it('does not reflect proxy fields, options or correlation inputs',()=>{
@@ -176,7 +176,8 @@ describe('review regressions: proxies and status aliases',()=>{
   rememberSdkFailure(error,'exception',error.message,proxy);
   rememberSdkFailure(error,'exception',error.message,{detailed:true,run:proxy as unknown as import('../private-diagnostics.js').SdkDiagnosticRun});
   expect(traps).toBe(0);expect(classifyFailure(error).category).toBe('stream_interrupted');
-  expect(privateDiagnosticRow(report,error)).not.toHaveProperty('sdk');
+  expect(privateDiagnosticRow(report,error)).toHaveProperty('sdk.fingerprint');
+  expect(privateDiagnosticRow(report,error)).not.toHaveProperty('sdk.detail');
  });
  it.each([
   [{status:'error',statusCode:503},503], [{status:NaN,httpStatus:429},429],
@@ -186,4 +187,34 @@ describe('review regressions: proxies and status aliases',()=>{
   const error=new Error('PRIVATE');rememberSdkFailure(error,'exception',error.message,{detailed:true,fields});
   expect(privateDiagnosticRow(report,error)).toMatchObject({sdk:{detail:{status:expected}}});
  });
+});
+
+
+describe('non-reflective diagnostic provenance', () => {
+ it('writes a row and inherits context without traversing proxy prototypes', () => {
+  let traps=0;const error=new Error('PRIVATE');
+  Object.setPrototypeOf(error,new Proxy(Error.prototype,{getPrototypeOf(){traps++;throw Error('PRIVATE_TRAP');}}));
+  rememberSdkFailure(error,'exception','PRIVATE');
+  const inherited=inheritSdkDiagnostic(new Error('wrapper'),error);
+  expect(privateDiagnosticRow(report,inherited)).toHaveProperty('sdk.fingerprint');
+  expect(recordPrivateFailure(root,true,report,error)).toBe(true);
+  expect(read()).toHaveProperty('sdk.fingerprint');expect(traps).toBe(0);
+ });
+ it.each(['500 internal server error','502 bad gateway'])('recognizes a closed provider template: %s',message=>{
+  const error=new Error(message);rememberSdkFailure(error,'error',message,{detailed:true});
+  expect(privateDiagnosticRow(report,error)).toHaveProperty('sdk.detail.templateId');
+  expect(JSON.stringify(privateDiagnosticRow(report,error))).not.toContain(message);
+ });
+});
+
+
+it('does not reflect callable thrown proxies during classification',()=>{
+ let traps=0;const thrown=new Proxy(()=>{}, {getPrototypeOf(){traps++;throw Error('PRIVATE');}});
+ expect(classifyFailure(thrown).category).toBe('unknown');expect(traps).toBe(0);
+});
+
+it('does not traverse a parse-error cause proxy prototype',()=>{
+ let traps=0;const cause=new SyntaxError('PRIVATE');
+ Object.setPrototypeOf(cause,new Proxy(SyntaxError.prototype,{getPrototypeOf(){traps++;throw Error('PRIVATE');}}));
+ expect(classifyFailure(new Error('Failed to parse item:',{cause})).category).toBe('unknown');expect(traps).toBe(0);
 });

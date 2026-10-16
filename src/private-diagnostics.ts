@@ -41,6 +41,8 @@ function textTemplate(message: string): string | undefined {
     [/^(?:429 )?rate limit exceeded$/i, 'rate_limit'],
     [/^(?:429 )?(?:insufficient_quota|quota exceeded|quota exhausted)$/i, 'quota'],
     [/^(?:503 )?service unavailable$/i, 'service_unavailable'],
+    [/^(?:502 )?bad gateway$/i, 'bad_gateway'],
+    [/^(?:500 )?internal server error$/i, 'internal_server_error'],
     [/^(?:401 )?(?:unauthorized|authentication failed)$/i, 'authentication'],
     [/^(?:403 )?(?:forbidden|permission denied)$/i, 'permission'],
     [/^(?:context_length_exceeded|context window exceeded|maximum context length exceeded)$/i, 'context_limit'],
@@ -107,20 +109,22 @@ export function rememberSdkFailure(error: Error, event: DiagnosticEvent, message
     // Even descriptor reflection can execute a proxy trap and mutate the
     // original failure before classification. Do not inspect proxy inputs.
     if (utilTypes.isProxy(error) || utilTypes.isProxy(options)) return;
-    if (options.detailed === true && (utilTypes.isProxy(options.fields) || utilTypes.isProxy(options.run))) return;
+    const detailsSafe = !utilTypes.isProxy(options.fields) && !utilTypes.isProxy(options.run);
     if (contexts.has(error)) return;
     if (typeof message !== 'string' || !['item.error','turn.failed','error','exception'].includes(event)) return;
     const bounded = message.slice(0, 8192);
     const code = own(error, 'code');
     contexts.set(error, { event, fingerprint:createHash('sha256').update(bounded).digest('hex'), messageBytes:Buffer.byteLength(message), fingerprintTruncated:message.length > bounded.length,
       ...(typeof code === 'string' && systemCodes.has(code) ? {code} : {}),
-      ...(options.detailed === true ? {detail:sdkDetail(message, options)} : {}) });
+      ...(options.detailed === true && detailsSafe ? {detail:sdkDetail(message, options)} : {}) });
   } catch { /* Fail closed: no partial record and no change to the actual error. */ }
 }
 
 /** WeakMap provenance is never serialized with public errors. */
 export function inheritSdkDiagnostic<T extends Error>(target: T, source: unknown): T {
-  if (source instanceof Error) { const context = contexts.get(source); if (context) contexts.set(target, context); }
+  if (source !== null && (typeof source === 'object' || typeof source === 'function')) {
+    const context = contexts.get(source as Error); if (context) contexts.set(target, context);
+  }
   return target;
 }
 
@@ -138,7 +142,7 @@ export function privateDiagnosticRow(report: FailureReport, error: unknown): obj
     attempts:Number.isSafeInteger(report.attempts) && report.attempts >= 0 ? report.attempts : 0,
     decision:['not_attempted','blocked_uncertain','exhausted','cancelled','fresh_retried'].includes(report.decision) ? report.decision : 'not_attempted',
     executionRisk:['proven_not_started','effects_observed','unknown'].includes(report.executionRisk) ? report.executionRisk : 'unknown',
-    node:process.version, ...(error instanceof Error && contexts.has(error) ? {sdk:{...contexts.get(error), ...(contexts.get(error)?.detail ? {detail:{...contexts.get(error)!.detail}} : {})}} : {}) };
+    node:process.version, ...(error !== null && (typeof error === 'object' || typeof error === 'function') && contexts.has(error as Error) ? {sdk:{...contexts.get(error as Error), ...(contexts.get(error as Error)?.detail ? {detail:{...contexts.get(error as Error)!.detail}} : {})}} : {}) };
 }
 
 /** Snapshot every directory component, rejecting symlink ancestors. macOS has
@@ -172,6 +176,10 @@ function directoryGuard(dataDir: string): {root: string; check: () => void} {
 export function recordPrivateFailure(dataDir: string, enabled: boolean, report: FailureReport, error: unknown,
   limits: {maxBytes:number; maxFiles:number} = PRIVATE_DIAGNOSTIC_LIMITS): boolean {
   if (!enabled) return true;
+  // Undefined flags are coerced to zero by bitwise OR. Refuse before *any*
+  // filesystem access/mutation rather than silently dropping safety guarantees.
+  if (![constants.O_DIRECTORY, constants.O_NOFOLLOW, constants.O_NONBLOCK]
+    .every(flag => typeof flag === 'number' && Number.isInteger(flag) && flag > 0)) return false;
   try {
     if (!Number.isInteger(limits.maxBytes) || limits.maxBytes < 256 || limits.maxBytes > PRIVATE_DIAGNOSTIC_LIMITS.maxBytes
       || !Number.isInteger(limits.maxFiles) || limits.maxFiles < 1 || limits.maxFiles > PRIVATE_DIAGNOSTIC_LIMITS.maxFiles) return false;

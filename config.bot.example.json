@@ -8,6 +8,8 @@
   "_comment_apiUrl": "apiUrl — override the Octo API base for this bot.",
 
   "sdk": {
+    "privateDiagnosticsDetails": false,
+    "_comment_private_diagnostics_details": "Requires privateDiagnostics=true too; bounded metadata only, no arbitrary text; local POSIX filesystem safety flags required.",
     "_comment_private_diagnostics": "Optional override: privateDiagnostics=true records bounded local failure metadata and message fingerprints; defaults off. No raw messages or tool output.",
     "_comment_model": "Override the model for this bot, e.g. 'gpt-5.5'. Omit to use the codex provider default.",
     "_comment_systemPrompt": "Inline personality string. A ./SOUL.md file next to this config overrides it. Written to the session AGENTS.md together with the security prefix.",
