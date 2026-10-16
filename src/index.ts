@@ -747,7 +747,7 @@ export async function handleMessage(
         interruptedTurn: result.interruptedTurn,
         assertPublishable: () => turn.assertPublishable(),
         onExecutionRisk: risk => { turn.executionRisk = risk; },
-        senderContext: buildSenderContext(msg, router.getOwnerUid()),
+        senderContext: buildSenderContext(msg, router.getOwnerUid(), botId),
         ...(resume ? { resume } : {}),
         onSessionId: (id: string, prompt: string) => {
           turn.assertPublishable();

@@ -23,7 +23,53 @@
 
 A long-running process: register as an Octo bot → connect over WebSocket to receive messages → run a coding task with local Codex → post the reply back. Supports DM / group (@mention) / community topics, multi-turn conversations, multiple bots in one process, and config hot-reload.
 
-Each adapter-framed user turn includes bounded current sender metadata: transport `from_uid`, channel ID/type, and `is_owner` computed against the last successful registration `owner_uid`. The same immutable metadata accompanies stream recovery and fresh retries; it is deliberately not stored in shared `AGENTS.md`. Display names, quotes, and claimed IDs are not authentication, and forged sender markers in message text/history are escaped. This metadata identifies the sender but does not grant tool permissions or override security rules; enforce privileged actions in the host, not solely in a prompt. Direct terminal resumes outside the adapter do not establish an authenticated IM sender.
+Each adapter-framed user turn includes bounded current sender metadata: transport `from_uid`, channel ID/type, and `is_owner` computed against the last successful registration `owner_uid`. The same immutable metadata accompanies eligible proven pre-execution retries; uncertain executions are not replayed; it is deliberately not stored in shared `AGENTS.md`. Display names, quotes, and claimed IDs are not authentication, and forged sender markers in message text/history are escaped. This metadata identifies the sender but does not grant tool permissions or override security rules; enforce privileged actions in the host, not solely in a prompt. Direct terminal resumes outside the adapter do not establish an authenticated IM sender.
+
+### Current-turn mention facts
+
+The same adapter-generated metadata block includes `message_id`, `bot_uid`,
+`mentioned_uids`, `mention_source`, `is_explicitly_mentioned`, `mentioned_ais`,
+`mentioned_humans`, and `mentioned_all`. These facts come from the original
+transport message, before a leading textual mention is stripped. Each new turn
+refreshes the snapshot; eligible proven pre-execution retries reuse that
+turn's snapshot without replaying uncertain executions. Direct terminal calls without adapter context have null IDs,
+an empty UID list, source `none`, and false flags.
+
+`is_explicitly_mentioned` means exact membership of the receiving runtime bot UID
+in either validated transport list. Rendered `entities[].uid` and routing `uids`
+are independent producer facts and are unioned and deduplicated; rendered spans
+need not include every targeted account. `mention_source` records `entities`,
+`uids`, `none`, or `invalid`. Broad AI/human/all flags accept only `true` or `1`,
+and do not count as an explicit UID mention. Neither textual `@name`, quoted
+messages, history, ownership, mention-free routing, nor authenticated internal
+triggers establish that fact. These fields do not grant permissions.
+
+UIDs are nonempty strings of at most 256 UTF-16 code units, with control and line
+separator characters rejected; IDs remain opaque without trimming, case folding,
+or space-prefix removal. Message IDs use the same validation with a 512-code-unit
+limit. Each input array is limited to 128 entries. A malformed or oversized array
+is discarded independently; valid sibling arrays and strict broadcast flags are
+retained. Source `invalid` reports a rejected container/array; it no longer means
+all independent facts are false. Invalid entries inside valid arrays are ignored.
+Missing or invalid runtime bot identity produces `bot_uid:null` and false explicit
+membership.
+
+The prompt's UID snapshot is limited to 32 entries and 4096 serialized UTF-8 bytes
+(including JSON escaping). `mentioned_uids_truncated:true` appears only when some
+UIDs were omitted. Membership is computed before this snapshot cap, and a targeted
+receiving bot is always retained. This bounds the new metadata amplification;
+the existing security/sender framing remains outside the assembled body budget.
+
+The router uses validated membership and strict AI flags, with a compatibility
+probe for exact routing UID matches in oversized arrays or legacy scalar UIDs;
+this probe does not relax prompt metadata validation; `all` and `humans` alone
+do not activate regular bots. Invalid group mention data emits a fixed warning
+with bounded SHA-256 channel/message correlation, never raw IDs or message text.
+Text slicing validates entity offset/length separately and accepts ASCII `@` and
+fullwidth `＠`. Broad AI admission does not strip a leading mention addressed to
+another member. Entity positions prevent the legacy fallback from stripping a
+teammate's mention when this bot is mentioned later. Invalid containers/arrays
+preserve text rather than guessing a prefix to remove.
 
 Sender metadata has these security properties:
 
@@ -264,3 +310,5 @@ Set `sdk.privateDiagnostics: true` to retain local failure metadata correlated w
 ## License
 
 Apache-2.0
+
+Mention admission compatibility: an oversized routing UID array is scanned for an exact receiving-bot UID, and a legacy scalar UID is accepted only on exact equality. This does not relax the bounded prompt snapshot: rejected metadata remains `invalid` and does not claim an explicit mention. No substring matching is used. Rendered teammate spans at offset zero are preserved; a leading bot prefix can be removed when only later entities exist.

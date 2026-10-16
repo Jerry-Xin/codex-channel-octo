@@ -55,8 +55,62 @@ import {
   MAX_TOOL_PARAM_CHARS,
 } from '../agent-bridge.js';
 import type { Config } from '../config.js';
+import { buildSenderContext } from '../sender-context.js';
+import { ChannelType, MessageType } from '../octo/types.js';
+
+describe('current-turn mention facts in actual SDK prompts', () => {
+  const sender = () => buildSenderContext({ message_id: 'current-message', message_seq: 1, from_uid: 'user',
+    channel_id: 'group', channel_type: ChannelType.Group, timestamp: 1,
+    payload: { type: MessageType.Text, content: '@bot request', mention: { uids: ['bot'] } },
+  }, 'owner', 'bot');
+
+  function currentMetadata(prompt: string) {
+    expect(prompt.match(new RegExp('^' + CURRENT_SENDER_ANCHOR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'gm'))).toHaveLength(1);
+    return JSON.parse(prompt.split(CURRENT_SENDER_ANCHOR + '\n')[1].split('\n')[0]);
+  }
+
+  it.each([undefined, 'existing-thread'])('includes explicit current mention facts on fresh/resumed calls (%s)', async (resume) => {
+    scriptedRuns = [async function* () { yield turnDone; }];
+    await collect(queryAgent('request', cfg(), undefined, undefined, { senderContext: sender(), resume }));
+    expect(currentMetadata(prompts[0])).toMatchObject({ message_id: 'current-message', bot_uid: 'bot',
+      mentioned_uids: ['bot'], mention_source: 'uids', is_explicitly_mentioned: true });
+  });
+
+  it.each([undefined, 'existing-thread'])('retains late bot membership in a bounded SDK metadata snapshot (%s)', async resume => {
+    scriptedRuns = [async function* () { yield turnDone; }];
+    const uids = Array.from({ length: 128 }, (_, n) => `${n}-` + '界'.repeat(250));
+    const bot = uids.at(-1)!;
+    const context = buildSenderContext({ message_id: 'bounded-message', message_seq: 1, from_uid: 'user',
+      channel_id: 'group', channel_type: ChannelType.Group, timestamp: 1,
+      payload: { type: MessageType.Text, content: 'request', mention: { uids } },
+    }, 'owner', bot);
+    await collect(queryAgent('request', cfg(), undefined, undefined, { senderContext: context, resume }));
+    const facts = currentMetadata(prompts[0]);
+    expect(facts).toMatchObject({ bot_uid: bot, is_explicitly_mentioned: true, mentioned_uids_truncated: true });
+    expect(facts.mentioned_uids).toContain(bot);
+    expect(facts.mentioned_uids.length).toBeLessThanOrEqual(32);
+    expect(Buffer.byteLength(JSON.stringify(facts.mentioned_uids))).toBeLessThanOrEqual(4096);
+  });
+
+  it('retains the same mention facts through a proven pre-spawn retry', async () => {
+    scriptedRuns = [async function* () { throw Object.assign(new Error('synthetic spawn failure'), { code: 'EAGAIN', syscall: 'spawn proxy' }); },
+      async function* () { yield turnDone; }];
+    const config = cfg(); config.sdk.recovery = { enabled: true, baseDelayMs: 1, maxDelayMs: 1 };
+    await collect(queryAgent('request', config, undefined, undefined, { senderContext: sender(), resume: 'existing' }));
+    expect(prompts).toHaveLength(2);
+    for (const prompt of prompts) expect(currentMetadata(prompt)).toMatchObject({ message_id: 'current-message',
+      bot_uid: 'bot', mentioned_uids: ['bot'], is_explicitly_mentioned: true });
+  });
+
+  it('uses complete fail-closed defaults when there is no adapter context', async () => {
+    scriptedRuns = [async function* () { yield turnDone; }];
+    await collect(queryAgent('@bot request', cfg()));
+    expect(currentMetadata(prompts[0])).toEqual({ from_uid: null, channel_id: null, channel_type: null, is_owner: false,
+      message_id: null, bot_uid: null, mentioned_uids: [], mention_source: 'none',
+      is_explicitly_mentioned: false, mentioned_ais: false, mentioned_humans: false, mentioned_all: false });
+  });
+});
 import { safePrivateMemorySnapshot } from '../prompt-safety.js';
-import { readFileSync } from 'node:fs';
 
 
 describe('SDK JSONL fail-closed diagnostics', () => {
