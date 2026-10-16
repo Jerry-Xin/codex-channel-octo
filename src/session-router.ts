@@ -520,7 +520,15 @@ export class SessionRouter {
       }));
     }
     // Note: mention.all is a humans-only signal (@所有人), bots do NOT respond.
-    return mention.is_explicitly_mentioned || mention.mentioned_ais;
+    // Admission compatibility is separate from the bounded prompt snapshot.
+    // Scan without copying/serializing oversized transport arrays; never use
+    // String.includes, which would admit partial UID matches.
+    const raw = msg.payload.mention as unknown as { uids?: unknown } | undefined;
+    const routingUids = raw?.uids;
+    const legacyTarget = mention.mention_source === 'invalid'
+      && (routingUids === this.robotId
+        || (Array.isArray(routingUids) && routingUids.some(uid => uid === this.robotId)));
+    return mention.is_explicitly_mentioned || mention.mentioned_ais || legacyTarget;
   }
 
   /**
@@ -677,10 +685,15 @@ export class SessionRouter {
             cleanContent = content.substring(botEntity.length).trimStart();
           }
         }
-        // Path 2: legacy UID-only fallback — never override entity positions.
+        // Path 2: routing-UID fallback when no entity claims the leading span.
         // In mention-free groups (G12) where the bot wasn't @'d, do NOT touch
         // the message — a leading @ is addressed to someone else.
-        if (cleanContent === content && metadata.is_explicitly_mentioned && metadata.mention_source === 'uids') {
+        const hasLeadingEntity = Array.isArray(mention?.entities) && mention.entities.some(
+          e => e !== null && typeof e === 'object' && !Array.isArray(e) && e.offset === 0,
+        );
+        if (cleanContent === content && metadata.is_explicitly_mentioned && metadata.mention_source !== 'invalid'
+          && metadata.mentioned_uids.includes(this.robotId) && !hasLeadingEntity
+          && Array.isArray(mention?.uids) && mention.uids.includes(this.robotId)) {
           cleanContent = content.replace(/^[@＠]\S+\s*/, '').trimStart();
         }
         // If stripping emptied the content, keep original.

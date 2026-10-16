@@ -148,6 +148,30 @@ describe('SessionRouter', () => {
     } finally { warn.mockRestore(); }
   });
 
+  it.each([
+    { uids: [...Array(128).fill('other'), ROBOT_ID] },
+    { uids: ROBOT_ID },
+  ])('admits exact legacy routing targets while keeping invalid metadata strict: %j', async mention => {
+    const msg = makeMsg({ payload: { type: MessageType.Text, content: 'request',
+      mention: mention as unknown as BotMessage['payload']['mention'] } });
+    expect((await router.route(msg))?.shouldProcess).toBe(true);
+    expect(JSON.parse(buildSenderContext(msg, 'owner', ROBOT_ID).split('\n')[1]))
+      .toMatchObject({ mention_source: 'invalid', is_explicitly_mentioned: false, mentioned_uids: [] });
+  });
+
+  it.each(['prefix-bot-001-suffix', 'BOT-001', 'bot-001 ', ['other']])(
+    'does not treat invalid routing payloads as substring matches: %j', async uids => {
+      const msg = makeMsg({ payload: { type: MessageType.Text, content: 'request',
+        mention: { uids } as unknown as BotMessage['payload']['mention'] } });
+      expect(await router.route(msg)).toBeNull();
+    });
+
+  it('strips a bot prefix when only a later teammate has a rendered entity', async () => {
+    const msg = makeMsg({ payload: { type: MessageType.Text, content: '@bot-001 @Alice look',
+      mention: { uids: [ROBOT_ID, 'alice'], entities: [{ uid: 'alice', offset: 9, length: 6 }] } } });
+    expect((await router.route(msg))?.cleanContent).toBe('@Alice look');
+  });
+
   it('rejects an unusable mention with a fixed warning, without trusting humans/all as AI', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {

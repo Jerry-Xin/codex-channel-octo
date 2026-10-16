@@ -60,7 +60,9 @@ UIDs were omitted. Membership is computed before this snapshot cap, and a target
 receiving bot is always retained. This bounds the new metadata amplification;
 the existing security/sender framing remains outside the assembled body budget.
 
-The router uses the same membership and strict AI flags; `all` and `humans` alone
+The router uses validated membership and strict AI flags, with a compatibility
+probe for exact routing UID matches in oversized arrays or legacy scalar UIDs;
+this probe does not relax prompt metadata validation; `all` and `humans` alone
 do not activate regular bots. Invalid group mention data emits a fixed warning
 with bounded SHA-256 channel/message correlation, never raw IDs or message text.
 Text slicing validates entity offset/length separately and accepts ASCII `@` and
@@ -308,3 +310,5 @@ Set `sdk.privateDiagnostics: true` to retain local failure metadata correlated w
 ## License
 
 Apache-2.0
+
+Mention admission compatibility: an oversized routing UID array is scanned for an exact receiving-bot UID, and a legacy scalar UID is accepted only on exact equality. This does not relax the bounded prompt snapshot: rejected metadata remains `invalid` and does not claim an explicit mention. No substring matching is used. Rendered teammate spans at offset zero are preserved; a leading bot prefix can be removed when only later entities exist.
