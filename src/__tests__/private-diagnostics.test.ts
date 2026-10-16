@@ -1,3 +1,4 @@
+import { nativeErrorMessage } from '../native-error.js';
 import { beforeEach, afterEach, describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, rmSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -217,4 +218,13 @@ it('does not traverse a parse-error cause proxy prototype',()=>{
  let traps=0;const cause=new SyntaxError('PRIVATE');
  Object.setPrototypeOf(cause,new Proxy(SyntaxError.prototype,{getPrototypeOf(){traps++;throw Error('PRIVATE');}}));
  expect(classifyFailure(new Error('Failed to parse item:',{cause})).category).toBe('unknown');expect(traps).toBe(0);
+});
+
+
+it.each(['AbortError','TimeoutError'])('persists native %s provenance without message text',name=>{
+ const error=new DOMException('PRIVATE_DOM_TEXT',name);const snapshot=classifyFailure(error);
+ rememberSdkFailure(error,'exception',nativeErrorMessage(error));
+ expect(recordPrivateFailure(root,true,{...report,first:snapshot,final:snapshot},error)).toBe(true);
+ expect(read()).toMatchObject({final:{category:name==='AbortError'?'cancelled':'timeout',evidence:'structured'},sdk:{event:'exception',fingerprint:createHash('sha256').update('PRIVATE_DOM_TEXT').digest('hex')}});
+ expect(JSON.stringify(read())).not.toContain('PRIVATE_DOM_TEXT');
 });

@@ -38,7 +38,7 @@ describe('safe recovery eligibility and budgets',()=>{
   expect(parseRetryAfter('2')).toBe(2000);expect(parseRetryAfter('Wed, 14 Oct 2026 00:00:02 GMT',Date.parse('2026-10-14T00:00:00Z'))).toBe(2000);
   expect(retryDelay({stage:'inference',category:'rate_limited',source:'sdk_event',evidence:'structured',retryAfterMs:12000},1,RECOVERY_DEFAULTS,()=>0)).toBe(12000);
  });
- it.each([{enabled:'yes'},{maxAttempts:0},{maxAttempts:6},{baseDelayMs:100,maxDelayMs:1},{unknown:true},{toString:1},[],null])('rejects invalid config %j',value=>expect(()=>validateRecovery(value)).toThrow());
+ it.each([{enabled:'yes'},{maxAttempts:0},{maxAttempts:6},{baseDelayMs:100,maxDelayMs:1},{unknown:true},{toString:1},[],null].map((value): [unknown] => [value]))('rejects invalid config %j',value=>expect(()=>validateRecovery(value)).toThrow());
 });
 describe('fixed error categories and safe user feedback',()=>{
  it.each([['429 rate limit exceeded','rate_limited'],['429 quota exhausted','quota_exhausted'],['503 service unavailable','provider_unavailable'],['401 unauthorized','auth'],['403 forbidden','permission'],['context_length_exceeded','context_limit'],['invalid encrypted content','invalid_encrypted_content']])('classifies %s', (text,category)=>expect(classifyFailure(new Error(text),'sdk_event').category).toBe(category));
@@ -62,5 +62,21 @@ describe('equal jitter bounds', () => {
   expect(retryDelay(failure, 1, RECOVERY_DEFAULTS, () => 0)).toBe(500);
   expect(retryDelay(failure, 2, RECOVERY_DEFAULTS, () => 0)).toBe(1000);
   expect(retryDelay(failure, 10, RECOVERY_DEFAULTS, () => 1)).toBe(RECOVERY_DEFAULTS.maxDelayMs);
+ });
+});
+
+
+describe('native DOMException classification compatibility', () => {
+ it.each([['AbortError','cancelled'],['TimeoutError','timeout']] as const)(
+  'preserves %s as structured %s', (name, category) => {
+   expect(classifyFailure(new DOMException('PRIVATE',name))).toMatchObject({stage:'inference',category,evidence:'structured'});
+  });
+ it('classifies cancellation from the real turn publication fence', () => {
+  const turn=new TurnContext(0);turn.cancel();let caught:unknown;
+  try {turn.assertPublishable();} catch(error) {caught=error;}
+  expect(classifyFailure(caught)).toMatchObject({category:'cancelled',evidence:'structured'});
+ });
+ it('classifies AbortSignal cancellation reasons', () => {
+  expect(classifyFailure(AbortSignal.abort().reason)).toMatchObject({category:'cancelled',evidence:'structured'});
  });
 });

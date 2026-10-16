@@ -1,6 +1,7 @@
 /** Public diagnostics are closed snapshots, never exception messages or causes. */
 import { randomUUID } from 'node:crypto';
 import { types as utilTypes } from 'node:util';
+import { isNativeDomAccessor } from './native-error.js';
 export type FailureStage = 'prepare' | 'spawn' | 'inference' | 'jsonl_parse' | 'process_exit' | 'delivery' | 'history_commit' | 'cleanup';
 export type FailureCategory = 'network_transient' | 'stream_interrupted' | 'rate_limited' | 'quota_exhausted' | 'provider_unavailable' | 'auth' | 'permission' | 'context_limit' | 'invalid_encrypted_content' | 'invalid_config' | 'jsonl_incomplete' | 'jsonl_invalid' | 'proxy_bootstrap' | 'process_exit' | 'cancelled' | 'timeout' | 'delivery_failed' | 'api_failed' | 'history_failed' | 'unknown';
 export type ExecutionRisk = 'proven_not_started' | 'effects_observed' | 'unknown';
@@ -39,7 +40,7 @@ function safeFailureReflection(value: unknown): boolean {
     if (depth >= 32 || utilTypes.isProxy(cursor)) return false;
     for (const key of ['message', 'name', 'code', 'syscall', 'cause', 'snapshot']) {
       const descriptor = Object.getOwnPropertyDescriptor(cursor, key);
-      if (descriptor && !('value' in descriptor)) return false;
+      if (descriptor && !('value' in descriptor) && !isNativeDomAccessor(value, cursor, key, descriptor)) return false;
     }
     cursor = Object.getPrototypeOf(cursor);
   }

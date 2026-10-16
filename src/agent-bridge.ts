@@ -1,3 +1,4 @@
+import { nativeErrorMessage } from './native-error.js';
 import { types as utilTypes } from 'node:util';
 import { rememberSdkFailure, inheritSdkDiagnostic, type SdkDiagnosticRun } from './private-diagnostics.js';
 import { recover, type RecoveryConfig } from './agent-recovery.js';
@@ -447,7 +448,7 @@ export async function* queryAgentEvents(
       // instanceof can traverse a proxy prototype even on a non-proxy Error.
       if (config.sdk.privateDiagnostics === true && config.sdk.privateDiagnosticsDetails === true
         && !utilTypes.isProxy(error) && utilTypes.isNativeError(error)) {
-        const message: unknown = Object.getOwnPropertyDescriptor(error, 'message')?.value;
+        const message = nativeErrorMessage(error);
         rememberSdkFailure(error,'exception',message,{detailed:true,fields:error,eventSubtype:'exception',
           run:{mode:opts?.resume ? 'resume' : 'start',attempt:0,resumeId:opts?.resume}});
       }
@@ -602,7 +603,7 @@ export async function* queryAgentEvents(
           if (isSideEffectItem(item.type)) {
             sideEffect.seen = true; risk = 'effects_observed'; opts?.onExecutionRisk?.(risk);
             // Report redacted progress once per item start/complete.
-            if (onToolUse && (ev.type === 'item.started' || ev.type === 'item.completed')) {
+            if (onToolUse && (eventType === 'item.started' || eventType === 'item.completed')) {
               const s = summarizeItem(item);
               if (s) {
                 try {
@@ -615,7 +616,7 @@ export async function* queryAgentEvents(
           } else if (item.type === 'web_search') {
             // Idempotent/read-only — NOT a side effect (keeps fresh-retry open),
             // but still surface a redacted progress notice.
-            if (onToolUse && (ev.type === 'item.started' || ev.type === 'item.completed')) {
+            if (onToolUse && (eventType === 'item.started' || eventType === 'item.completed')) {
               const s = summarizeItem(item);
               if (s) {
                 try {
@@ -648,7 +649,7 @@ export async function* queryAgentEvents(
           } else if (
             (item.type === 'reasoning' || item.type === 'todo_list') &&
             onToolUse &&
-            ev.type === 'item.started'
+            eventType === 'item.started'
           ) {
             // Non-side-effect progress: announce activity without leaking detail.
             try {
@@ -712,7 +713,7 @@ export async function* queryAgentEvents(
       // or replace the failure before the normal classifier/recovery path.
       try {
         if (config.sdk.privateDiagnostics === true && !utilTypes.isProxy(error) && utilTypes.isNativeError(error)) {
-          const message: unknown = Object.getOwnPropertyDescriptor(error, 'message')?.value;
+          const message = nativeErrorMessage(error);
           rememberSdkFailure(error, 'exception', message, {
             detailed: config.sdk.privateDiagnosticsDetails === true, fields: error,
             eventSubtype: 'exception', run: diagnosticRun,

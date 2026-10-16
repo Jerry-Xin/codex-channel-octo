@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { TurnFailure } from '../agent-failure.js';
+import { TurnFailure, classifyFailure } from '../agent-failure.js';
 /**
  * agent-bridge typed-event tests (queryAgentEvents) — mocked @openai/codex-sdk.
  * Covers work identity / first-sight seq, message phase and revisions, attempt
@@ -668,4 +668,43 @@ describe('stream catch diagnostic reflection regressions', () => {
   try { for await(const value of queryAgentEvents('request',config))void value; } catch(error) {caught=error;}
   expect(reads).toBe(0);expect(caught).toBeInstanceOf(TurnFailure);expect(runIdx).toBe(1);
  });
+});
+
+
+describe('DOMException private diagnostic compatibility', () => {
+ it.each(['AbortError','TimeoutError'])('preserves %s classification and exception fingerprints', async name => {
+  for(const sdk of [{}, {privateDiagnostics:true}, {privateDiagnostics:true,privateDiagnosticsDetails:true}]) {
+   const message='PRIVATE_DOM_MESSAGE';scriptedRuns=[async function*(){throw new DOMException(message,name);}];runIdx=0;
+   const config=cfg();config.sdk=sdk;let caught:unknown;
+   try {for await(const value of queryAgentEvents('request',config))void value;}catch(error){caught=error;}
+   expect(caught).toBeInstanceOf(TurnFailure);const failure=caught as TurnFailure;
+   expect(failure.report.final).toMatchObject({category:name==='AbortError'?'cancelled':'timeout',evidence:'structured'});
+   const row=privateDiagnosticRow(failure.report,failure);
+   if(sdk.privateDiagnostics) expect(row).toMatchObject({sdk:{event:'exception',fingerprint:createHash('sha256').update(message).digest('hex')}});
+   else expect(row).not.toHaveProperty('sdk');
+   expect(JSON.stringify(row)).not.toContain(message);expect(runIdx).toBe(1);
+  }
+ });
+ it.each(['AbortError','TimeoutError'])('captures a native %s constructor error only with detailed opt-in', async name=>{
+  const error=new DOMException('PRIVATE_CONSTRUCTOR_DOM',name);constructorError=error;
+  const config=cfg();config.sdk={privateDiagnostics:true,privateDiagnosticsDetails:true};let caught:unknown;
+  try{for await(const value of queryAgentEvents('request',config))void value;}catch(e){caught=e;}
+  expect(caught).toBe(error);expect(runIdx).toBe(0);
+  const snapshot=classifyFailure(error);
+  expect(privateDiagnosticRow({diagnosticId:'3f8d62cf-fca8-4e92-a0a0-cdb5db5c6ab2',attempts:0,decision:'not_attempted',executionRisk:'proven_not_started',first:snapshot,final:snapshot},error))
+   .toHaveProperty('sdk.fingerprint');
+ });
+});
+
+describe('single-read event types across progress paths',()=>{
+ it.each(['command_execution','web_search','reasoning','todo_list'])(
+  'reads the %s event discriminant once',async itemType=>{
+   for(const type of ['item.started','item.completed']) {
+    let reads=0;const event={get type(){if(++reads>1)throw Error('PRIVATE_SECOND_READ');return type;},
+     item:{id:'progress',type:itemType,command:'synthetic',query:'synthetic'}};
+    runIdx=0;scriptedRuns=[async function*(){yield event;yield {type:'item.completed',item:{id:'final',type:'agent_message',text:'done'}};yield {type:'turn.completed',usage:{}};}];
+    const output=[];for await(const value of queryAgentEvents('request',cfg(),undefined,()=>{})) output.push(value);
+    expect(reads).toBe(1);expect(output).toContainEqual(expect.objectContaining({kind:'message',text:'done'}));
+   }
+  });
 });

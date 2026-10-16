@@ -8,16 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
 - Separate `sdk.privateDiagnosticsDetails` opt-in for bounded allowlisted SDK failure metadata; requires `privateDiagnostics` and never captures arbitrary text.
+- Opt-in `sdk.privateDiagnostics` saves bounded owner-only failure metadata and SDK message fingerprints. Raw SDK/error/prompt/tool payloads stay excluded; rotation is limited to three 1 MiB files and diagnostic I/O failure cannot alter task behavior.
 
 ### Changed
+
 - Harden private diagnostics with no-follow/inode/hard-link/permission checks; require a pre-existing data directory and POSIX safety flags. Unsupported flags fail closed before filesystem mutation; native Windows and network/FUSE filesystem compatibility are unverified.
 - Diagnostic capture and provenance lookup avoid SDK accessors/proxy prototype reflection; hostile classifier inputs fail closed without executing traps.
-
-
-### Added
-
-- Opt-in `sdk.privateDiagnostics` saves bounded owner-only failure metadata and SDK message fingerprints. Raw SDK/error/prompt/tool payloads stay excluded; rotation is limited to three 1 MiB files and diagnostic I/O failure cannot alter task behavior.
 
 ### Fixed
 
